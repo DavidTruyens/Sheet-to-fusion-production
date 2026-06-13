@@ -21,8 +21,8 @@ import re
 import io
 import csv
 import json
-import tempfile
 import urllib.request
+import urllib.error
 
 app = adsk.core.Application.get()
 ui = app.userInterface
@@ -40,7 +40,26 @@ TEMPLATE_CMD_NAME = 'Create Variant Sheet Template'
 TEMPLATE_CMD_DESC = ('Writes a CSV template whose columns are the model\'s favorite '
                      '(or user) parameters, ready to import into Google Sheets.')
 
-PANEL_ID = 'SolidScriptsAddinsPanel'
+# Icon resource folders (each holds 16x16/32x32/64x64 PNGs). Absolute paths so
+# Fusion resolves them regardless of its current working directory.
+_ICON_BASE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'resources')
+BUILD_ICON_FOLDER = os.path.join(_ICON_BASE, 'BuildAssembly')
+TEMPLATE_ICON_FOLDER = os.path.join(_ICON_BASE, 'CreateTemplate')
+
+# Place the add-in's commands in their own panel under the MANAGE tab of the
+# Design workspace. The tab is matched by its visible name because the internal
+# ids are not stable across versions ('ToolsTab' is actually UTILITIES).
+WORKSPACE_ID = 'FusionSolidEnvironment'
+TAB_NAME = 'MANAGE'
+# A panel id must be unique per workspace and Fusion persists API-created panels
+# across reloads, so a stale panel left on another tab by an earlier version
+# would be reused instead of a fresh one being made on MANAGE. Use a new id and
+# delete any older ones during cleanup.
+PANEL_ID = 'SheetVariantsManagePanel'
+PANEL_NAME = 'Sheet Variants'
+OBSOLETE_PANEL_IDS = ('SheetVariantsPanel',)
+# Fallback panel (under UTILITIES > ADD-INS) if the Manage tab is unavailable.
+FALLBACK_PANEL_ID = 'SolidScriptsAddinsPanel'
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'settings.json')
 
@@ -73,37 +92,67 @@ def save_setting(data):
 # Google Sheet reading. Works with no extra Python packages by pulling the
 # sheet as CSV over HTTP (Fusion's bundled Python ships urllib + csv).
 # --------------------------------------------------------------------------- #
-def to_csv_url(url):
-    """Turn a share / edit / publish link into a CSV-export link."""
+SHARING_HELP = (
+    'Make sure the sheet is shared so anyone with the link can read it: in Google '
+    'Sheets, Share > General access > "Anyone with the link" > Viewer. '
+    '(Or publish it: File > Share > Publish to web.) Then paste that link here.')
+
+
+def csv_url_candidates(url):
+    """Turn a share / edit / publish link into one or more CSV-export links.
+
+    We use the ``/export?format=csv`` endpoint, which returns cell values exactly
+    as typed (the ``gviz`` endpoint is avoided because it applies per-column type
+    inference and silently drops units, e.g. "500 mm" becomes empty). For sheets
+    shared as "anyone with the link", supplying a ``gid`` makes the signed
+    redirect fail with HTTP 400, so the default first tab is requested without a
+    gid; a gid is only added when the link explicitly points at a non-first tab.
+    """
     url = url.strip()
-    if 'output=csv' in url or ('/export?' in url and 'format=csv' in url):
-        return url
+    if 'output=csv' in url or 'format=csv' in url:
+        return [url]
     # Published-to-web URL: .../d/e/<id>/pub...
     if re.search(r'/spreadsheets/d/e/[^/]+/pub', url):
         sep = '&' if '?' in url else '?'
-        return url if 'output=csv' in url else url + sep + 'output=csv'
+        return [url + sep + 'output=csv']
     # Standard share/edit URL: .../d/<id>/edit#gid=<gid>
     m = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
     if m:
         sheet_id = m.group(1)
+        base = 'https://docs.google.com/spreadsheets/d/{}/export?format=csv'.format(sheet_id)
         gid_match = re.search(r'[#&?]gid=(\d+)', url)
-        gid = gid_match.group(1) if gid_match else '0'
-        return 'https://docs.google.com/spreadsheets/d/{}/export?format=csv&gid={}'.format(sheet_id, gid)
-    return url
+        gid = gid_match.group(1) if gid_match else None
+        if gid and gid != '0':
+            # A specific tab was requested. Try it, then fall back to the first tab.
+            return [base + '&gid=' + gid, base]
+        return [base]
+    return [url]
 
 
 def fetch_rows(url):
-    csv_url = to_csv_url(url)
-    req = urllib.request.Request(csv_url, headers={'User-Agent': 'Mozilla/5.0 (FusionAddin)'})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = resp.read().decode('utf-8-sig', errors='replace')
+    candidates = csv_url_candidates(url)
+    raw = None
+    last_err = None
+    for csv_url in candidates:
+        req = urllib.request.Request(csv_url, headers={'User-Agent': 'Mozilla/5.0 (FusionAddin)'})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode('utf-8-sig', errors='replace')
+            break
+        except urllib.error.HTTPError as e:
+            last_err = 'HTTP {} {}'.format(e.code, e.reason)
+        except urllib.error.URLError as e:
+            last_err = str(e.reason)
+
+    if raw is None:
+        raise RuntimeError(
+            'Could not download the sheet ({}).\n\n{}'.format(last_err or 'unknown error', SHARING_HELP))
 
     head = raw.lstrip()[:200].lower()
     if head.startswith('<!doctype html') or '<html' in head:
         raise RuntimeError(
-            'That URL returned a web page instead of CSV. Share the sheet as '
-            '"Anyone with the link" or publish it to the web as CSV '
-            '(File > Share > Publish to web > entire sheet > CSV).')
+            'That URL returned a web page instead of CSV, which usually means the '
+            'sheet is not readable without signing in.\n\n' + SHARING_HELP)
 
     rows = [r for r in csv.reader(io.StringIO(raw)) if any(c.strip() for c in r)]
     if len(rows) < 2:
@@ -114,7 +163,58 @@ def fetch_rows(url):
 # --------------------------------------------------------------------------- #
 # Core work.
 # --------------------------------------------------------------------------- #
-def build_assembly(sheet_url, spacing_cm, keep_sat):
+def unquote_text(expression):
+    """Strip the surrounding single/double quotes from a text-parameter
+    expression so the sheet shows the bare value (e.g. 'A-6' -> A-6). Leaves
+    numeric expressions like '50 mm' untouched."""
+    s = (expression or '').strip()
+    if len(s) >= 2 and s[0] in ("'", '"') and s[-1] == s[0]:
+        return s[1:-1]
+    return expression
+
+
+def apply_expression(param, raw):
+    """Write a sheet cell into a parameter's expression.
+
+    Text parameters need a single-quoted string expression (e.g. 'A-6'), but a
+    sheet usually supplies the bare text — sometimes with a stray quote left
+    over from a spreadsheet's text-prefix (so "1-1" can arrive as "1-1'"). We
+    detect text parameters from their current expression and re-quote the value;
+    numeric parameters get the value as-is.
+    """
+    raw = raw.strip()
+    if not raw:
+        return
+    current = (param.expression or '').strip()
+    if current[:1] in ("'", '"'):                     # existing text parameter
+        param.expression = "'" + raw.strip('\'"') + "'"
+        return
+    try:
+        param.expression = raw
+    except Exception:
+        try:                                          # maybe an unquoted text param
+            param.expression = "'" + raw.strip('\'"') + "'"
+        except Exception:
+            raise RuntimeError(
+                'Could not set parameter "{}" to "{}". Numeric values may need a '
+                'unit (e.g. "50 mm"); text values are quoted automatically.'
+                .format(param.name, raw))
+
+
+def iter_solid_bodies(design):
+    """Yield every solid BRepBody in the design (root plus all occurrences),
+    as proxies positioned in their assembly-context (world) location."""
+    root = design.rootComponent
+    for b in root.bRepBodies:
+        if b.isSolid:
+            yield b
+    for occ in root.allOccurrences:
+        for b in occ.bRepBodies:
+            if b.isSolid:
+                yield b
+
+
+def build_assembly(sheet_url, spacing_cm):
     rows = fetch_rows(sheet_url)
     header = [h.strip() for h in rows[0]]
     if not header or not header[0]:
@@ -133,16 +233,19 @@ def build_assembly(sheet_url, spacing_cm, keep_sat):
     # Snapshot original expressions so we can restore the source model afterwards.
     original = {p: all_params.itemByName(p).expression for p in param_names}
 
-    out_dir = os.path.join(tempfile.gettempdir(), 'sheet_variants_export')
-    os.makedirs(out_dir, exist_ok=True)
-
-    export_mgr = src_design.exportManager
-    exported = []  # list of (component_name, sat_path)
+    # Assemble into a brand-new design document. Geometry is copied directly as
+    # temporary BReps (no SAT/STEP export), so this also works on the Fusion
+    # Personal licence, which restricts file exports.
+    new_doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    new_design = adsk.fusion.Design.cast(new_doc.products.itemByProductType('DesignProductType'))
+    root = new_design.rootComponent
+    tbm = adsk.fusion.TemporaryBRepManager.get()
 
     progress = ui.createProgressDialog()
     progress.isCancelButtonShown = True
-    progress.show('Exporting variants', 'Exporting %v of %m', 0, len(rows) - 1, 0)
+    progress.show('Building variants', 'Building %v of %m', 0, len(rows) - 1, 0)
 
+    built = 0
     try:
         for i, row in enumerate(rows[1:]):
             if progress.wasCancelled:
@@ -156,13 +259,33 @@ def build_assembly(sheet_url, spacing_cm, keep_sat):
                 if col < len(row):
                     val = row[col].strip()
                     if val:
-                        all_params.itemByName(pname).expression = val
+                        apply_expression(all_params.itemByName(pname), val)
             adsk.doEvents()  # let the parametric model recompute
 
-            sat_path = os.path.join(out_dir, safe_name + '.sat')
-            sat_opts = export_mgr.createSATExportOptions(sat_path, src_design.rootComponent)
-            export_mgr.execute(sat_opts)
-            exported.append((safe_name, sat_path))
+            # Snapshot the source solids as standalone temporary BReps.
+            temp_bodies = []
+            for body in iter_solid_bodies(src_design):
+                try:
+                    temp_bodies.append(tbm.copy(body))
+                except Exception:
+                    pass
+            if not temp_bodies:
+                continue
+
+            transform = adsk.core.Matrix3D.create()
+            transform.translation = adsk.core.Vector3D.create(built * spacing_cm, 0.0, 0.0)
+            occ = root.occurrences.addNewComponent(transform)   # one component per variant
+            occ.component.name = safe_name
+
+            base = occ.component.features.baseFeatures.add()
+            base.startEdit()
+            try:
+                for tb in temp_bodies:
+                    occ.component.bRepBodies.add(tb, base)
+            finally:
+                base.finishEdit()
+
+            built += 1
             progress.progressValue = i + 1
     finally:
         # Always put the source model back the way we found it.
@@ -174,36 +297,10 @@ def build_assembly(sheet_url, spacing_cm, keep_sat):
         adsk.doEvents()
         progress.hide()
 
-    if not exported:
-        raise RuntimeError('No variants were exported.')
+    if built == 0:
+        raise RuntimeError('No variants were built. Does the source model contain at least one solid body?')
 
-    # Assemble everything into a brand-new design document.
-    new_doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
-    new_design = adsk.fusion.Design.cast(new_doc.products.itemByProductType('DesignProductType'))
-    root = new_design.rootComponent
-    import_mgr = app.importManager
-
-    for i, (name, path) in enumerate(exported):
-        transform = adsk.core.Matrix3D.create()
-        transform.translation = adsk.core.Vector3D.create(i * spacing_cm, 0.0, 0.0)
-        occ = root.occurrences.addNewComponent(transform)   # one component per variant
-        occ.component.name = name
-        sat_opts = import_mgr.createSATImportOptions(path)
-        sat_opts.isViewFit = False
-        import_mgr.importToTarget(sat_opts, occ.component)
-
-    if not keep_sat:
-        for _, path in exported:
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-        try:
-            os.rmdir(out_dir)
-        except Exception:
-            pass
-
-    return len(exported), (out_dir if keep_sat else None)
+    return built
 
 
 # --------------------------------------------------------------------------- #
@@ -251,8 +348,11 @@ def create_template(use_favorites):
 
     header = ['Name'] + [p.name for p in params]
     # One example row seeded with the model's current expressions, so the
-    # expected "value + unit" format is obvious.
-    example = ['Variant_1'] + [p.expression for p in params]
+    # expected "value + unit" format is obvious. Text parameters are written
+    # without their surrounding quotes (so 'A-6' becomes A-6) to keep the sheet
+    # tidy; the quotes are re-added automatically on import based on the model's
+    # parameter type, so a value can even be a number used as engraving text.
+    example = ['Variant_1'] + [unquote_text(p.expression) for p in params]
 
     with open(path, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -271,18 +371,14 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             inputs = args.command.commandInputs
             url = inputs.itemById('sheetUrl').value.strip()
             spacing_cm = inputs.itemById('spacing').value      # ValueInput returns internal cm
-            keep = inputs.itemById('keepSat').value
             if not url:
                 ui.messageBox('Please paste the Google Sheet URL.')
                 return
 
-            save_setting({'sheet_url': url, 'spacing_mm': spacing_cm * 10.0, 'keep_sat': keep})
-            count, kept_dir = build_assembly(url, spacing_cm, keep)
+            save_setting({'sheet_url': url, 'spacing_mm': spacing_cm * 10.0})
+            count = build_assembly(url, spacing_cm)
 
-            msg = 'Done. Created an assembly with {} variant component(s).'.format(count)
-            if kept_dir:
-                msg += '\n\nSAT files kept in:\n{}'.format(kept_dir)
-            ui.messageBox(msg)
+            ui.messageBox('Done. Created an assembly with {} variant component(s).'.format(count))
         except Exception:
             if ui:
                 ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
@@ -292,7 +388,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
             cmd = args.command
-            cmd.setDialogInitialSize(460, 220)
+            cmd.setDialogInitialSize(460, 180)
             inputs = cmd.commandInputs
 
             url_in = inputs.addStringValueInput('sheetUrl', 'Google Sheet URL', load_setting('sheet_url', ''))
@@ -303,9 +399,6 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 'spacing', 'Component spacing (mm)', 'mm',
                 adsk.core.ValueInput.createByReal(default_mm / 10.0))
             spacing_in.tooltip = 'Gap between components along X in the new assembly. Set 0 to stack them at the origin.'
-
-            inputs.addBoolValueInput('keepSat', 'Keep intermediate SAT files', True, '',
-                                     bool(load_setting('keep_sat', False)))
 
             on_exec = CommandExecuteHandler()
             cmd.execute.add(on_exec)
@@ -353,27 +446,109 @@ class TemplateCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
 
 
+def find_tab_by_name(workspace, name):
+    """Find a ribbon tab by its visible name (e.g. 'MANAGE')."""
+    tabs = workspace.toolbarTabs
+    target = name.strip().lower()
+    for i in range(tabs.count):
+        tab = tabs.item(i)
+        try:
+            if (tab.name or '').strip().lower() == target:
+                return tab
+        except Exception:
+            pass
+    return None
+
+
+def get_manage_panel():
+    """Create/return the add-in's own panel on the MANAGE tab of the Design
+    workspace, falling back to UTILITIES > ADD-INS if the tab can't be found."""
+    workspace = ui.workspaces.itemById(WORKSPACE_ID)
+    if workspace:
+        tab = find_tab_by_name(workspace, TAB_NAME)
+        if tab:
+            panel = tab.toolbarPanels.itemById(PANEL_ID) or \
+                tab.toolbarPanels.add(PANEL_ID, PANEL_NAME)
+            if panel:
+                return panel
+    return ui.allToolbarPanels.itemById(FALLBACK_PANEL_ID)
+
+
+def cleanup_ui():
+    """Remove our command controls and our custom panel from wherever they live,
+    then delete the command definitions. Run on stop and again before (re)adding
+    on start, because a panel ID is unique per workspace: a panel left behind on
+    another tab by a previous load would otherwise be reused instead of a fresh
+    one being created on the MANAGE tab. Safe to call repeatedly."""
+    cmd_ids = (CMD_ID, TEMPLATE_CMD_ID)
+    panel_ids = (PANEL_ID,) + OBSOLETE_PANEL_IDS
+
+    try:
+        for wi in range(ui.workspaces.count):
+            try:
+                tabs = ui.workspaces.item(wi).toolbarTabs
+            except Exception:
+                continue
+            for ti in range(tabs.count):
+                try:
+                    panels = tabs.item(ti).toolbarPanels
+                except Exception:
+                    continue
+                stale = []
+                for pi in range(panels.count):
+                    panel = panels.item(pi)
+                    for cid in cmd_ids:
+                        ctrl = panel.controls.itemById(cid)
+                        if ctrl:
+                            ctrl.deleteMe()
+                    if panel.id in panel_ids:
+                        stale.append(panel)
+                for panel in stale:
+                    panel.deleteMe()
+    except Exception:
+        pass
+
+    # Global sweep for any remaining instance of our panels.
+    for pid in panel_ids:
+        try:
+            panel = ui.allToolbarPanels.itemById(pid)
+            while panel:
+                panel.deleteMe()
+                panel = ui.allToolbarPanels.itemById(pid)
+        except Exception:
+            pass
+
+    for cid in cmd_ids:
+        try:
+            cmd_def = ui.commandDefinitions.itemById(cid)
+            if cmd_def:
+                cmd_def.deleteMe()
+        except Exception:
+            pass
+
+
 def run(context):
     try:
-        cmd_defs = ui.commandDefinitions
-        cmd_def = cmd_defs.itemById(CMD_ID) or cmd_defs.addButtonDefinition(CMD_ID, CMD_NAME, CMD_DESC)
+        cleanup_ui()  # clear any panel/commands a previous load left behind
 
+        cmd_defs = ui.commandDefinitions
+        cmd_def = cmd_defs.addButtonDefinition(CMD_ID, CMD_NAME, CMD_DESC, BUILD_ICON_FOLDER)
         on_created = CommandCreatedHandler()
         cmd_def.commandCreated.add(on_created)
         _handlers.append(on_created)
 
-        panel = ui.allToolbarPanels.itemById(PANEL_ID)
-        if panel and not panel.controls.itemById(CMD_ID):
-            panel.controls.addCommand(cmd_def)
-
-        # Template button.
-        tmpl_def = cmd_defs.itemById(TEMPLATE_CMD_ID) or \
-            cmd_defs.addButtonDefinition(TEMPLATE_CMD_ID, TEMPLATE_CMD_NAME, TEMPLATE_CMD_DESC)
+        tmpl_def = cmd_defs.addButtonDefinition(TEMPLATE_CMD_ID, TEMPLATE_CMD_NAME,
+                                                TEMPLATE_CMD_DESC, TEMPLATE_ICON_FOLDER)
         on_tmpl_created = TemplateCreatedHandler()
         tmpl_def.commandCreated.add(on_tmpl_created)
         _handlers.append(on_tmpl_created)
-        if panel and not panel.controls.itemById(TEMPLATE_CMD_ID):
-            panel.controls.addCommand(tmpl_def)
+
+        panel = get_manage_panel()
+        if panel:
+            if not panel.controls.itemById(CMD_ID):
+                panel.controls.addCommand(cmd_def)
+            if not panel.controls.itemById(TEMPLATE_CMD_ID):
+                panel.controls.addCommand(tmpl_def)
     except Exception:
         if ui:
             ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
@@ -381,15 +556,7 @@ def run(context):
 
 def stop(context):
     try:
-        panel = ui.allToolbarPanels.itemById(PANEL_ID)
-        for cid in (CMD_ID, TEMPLATE_CMD_ID):
-            if panel:
-                ctrl = panel.controls.itemById(cid)
-                if ctrl:
-                    ctrl.deleteMe()
-            cmd_def = ui.commandDefinitions.itemById(cid)
-            if cmd_def:
-                cmd_def.deleteMe()
+        cleanup_ui()
         _handlers.clear()
     except Exception:
         if ui:

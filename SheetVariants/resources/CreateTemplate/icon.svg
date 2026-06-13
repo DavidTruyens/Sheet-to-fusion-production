@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- spreadsheet -->
+  <rect x="12" y="9" width="32" height="42" rx="3" fill="#ffffff" stroke="#2c3e50" stroke-width="2"/>
+  <rect x="12" y="9" width="32" height="9" rx="3" fill="#4a90d9"/>
+  <rect x="12" y="14" width="32" height="4" fill="#4a90d9"/>
+  <!-- column + row grid -->
+  <g stroke="#9fb1c1" stroke-width="1.4">
+    <line x1="23" y1="18" x2="23" y2="51"/>
+    <line x1="33" y1="18" x2="33" y2="51"/>
+    <line x1="12" y1="27" x2="44" y2="27"/>
+    <line x1="12" y1="36" x2="44" y2="36"/>
+    <line x1="12" y1="45" x2="44" y2="45"/>
+  </g>
+  <!-- pencil over the lower-right corner -->
+  <g transform="rotate(45 46 44)">
+    <rect x="40" y="40" width="22" height="8" rx="1.5" fill="#f5a623" stroke="#1f2d3d" stroke-width="1.4"/>
+    <rect x="40" y="40" width="5" height="8" fill="#f7b7b2" stroke="#1f2d3d" stroke-width="1.4"/>
+    <polygon points="62,40 68,44 62,48" fill="#f0d8a8" stroke="#1f2d3d" stroke-width="1.4" stroke-linejoin="round"/>
+    <polygon points="66.5,42.3 68,44 66.5,45.7" fill="#3a3a3a"/>
+  </g>
+</svg>
