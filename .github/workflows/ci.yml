@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Byte-compile the add-in
+        run: python -m py_compile SheetVariants/SheetVariants.py
+
+      - name: Validate the manifest is valid JSON
+        run: python -m json.tool SheetVariants/SheetVariants.manifest > /dev/null
+
+      - name: Lint for real errors (pyflakes)
+        run: |
+          python -m pip install --upgrade pyflakes
+          pyflakes SheetVariants/SheetVariants.py

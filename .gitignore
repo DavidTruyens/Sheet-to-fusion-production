@@ -1,0 +1,9 @@
+# Add-in runtime settings (remembers last URL/options)
+SheetVariants/settings.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Intermediate exports
+*.sat
