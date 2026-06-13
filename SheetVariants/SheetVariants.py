@@ -33,7 +33,7 @@ _handlers = []
 CMD_ID = 'sheetVariantsBuildAssemblyCmd'
 CMD_NAME = 'Build Variants Assembly from Sheet'
 CMD_DESC = ('Reads model variants from a Google Sheet, applies the parameters, '
-            'exports each variant as SAT and assembles them in a new design.')
+            'and assembles a copy of each variant as a component in a new design.')
 
 TEMPLATE_CMD_ID = 'sheetVariantsCreateTemplateCmd'
 TEMPLATE_CMD_NAME = 'Create Variant Sheet Template'
@@ -246,6 +246,7 @@ def build_assembly(sheet_url, spacing_cm):
     progress.show('Building variants', 'Building %v of %m', 0, len(rows) - 1, 0)
 
     built = 0
+    x_cursor = 0.0   # running left edge for the next variant, internal cm
     try:
         for i, row in enumerate(rows[1:]):
             if progress.wasCancelled:
@@ -272,8 +273,13 @@ def build_assembly(sheet_url, spacing_cm):
             if not temp_bodies:
                 continue
 
+            # Lay variants out along X with a fixed gap between their bounding
+            # boxes: shift this variant so its left edge sits at x_cursor.
+            min_x = min(tb.boundingBox.minPoint.x for tb in temp_bodies)
+            max_x = max(tb.boundingBox.maxPoint.x for tb in temp_bodies)
+
             transform = adsk.core.Matrix3D.create()
-            transform.translation = adsk.core.Vector3D.create(built * spacing_cm, 0.0, 0.0)
+            transform.translation = adsk.core.Vector3D.create(x_cursor - min_x, 0.0, 0.0)
             occ = root.occurrences.addNewComponent(transform)   # one component per variant
             occ.component.name = safe_name
 
@@ -285,6 +291,7 @@ def build_assembly(sheet_url, spacing_cm):
             finally:
                 base.finishEdit()
 
+            x_cursor += (max_x - min_x) + spacing_cm
             built += 1
             progress.progressValue = i + 1
     finally:
@@ -396,9 +403,11 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
             default_mm = float(load_setting('spacing_mm', 100.0))
             spacing_in = inputs.addValueInput(
-                'spacing', 'Component spacing (mm)', 'mm',
+                'spacing', 'Gap between variants (mm)', 'mm',
                 adsk.core.ValueInput.createByReal(default_mm / 10.0))
-            spacing_in.tooltip = 'Gap between components along X in the new assembly. Set 0 to stack them at the origin.'
+            spacing_in.tooltip = ('Clear space left between each variant\'s bounding box along X. '
+                                  'Each variant is placed right after the previous one plus this gap; '
+                                  'set 0 to butt them together.')
 
             on_exec = CommandExecuteHandler()
             cmd.execute.add(on_exec)
@@ -545,10 +554,12 @@ def run(context):
 
         panel = get_manage_panel()
         if panel:
-            if not panel.controls.itemById(CMD_ID):
-                panel.controls.addCommand(cmd_def)
-            if not panel.controls.itemById(TEMPLATE_CMD_ID):
-                panel.controls.addCommand(tmpl_def)
+            for cmd_id, definition in ((CMD_ID, cmd_def), (TEMPLATE_CMD_ID, tmpl_def)):
+                control = panel.controls.itemById(cmd_id) or panel.controls.addCommand(definition)
+                if control:
+                    # Show both buttons directly on the panel (not just the overflow).
+                    control.isPromoted = True
+                    control.isPromotedByDefault = True
     except Exception:
         if ui:
             ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
