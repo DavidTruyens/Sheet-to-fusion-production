@@ -10,3 +10,6 @@ __pycache__/
 
 # Editor / Fusion debug config
 .vscode/
+
+# Test artifacts
+.pytest_cache/
