@@ -18,11 +18,17 @@ import adsk.fusion
 import traceback
 import os
 import re
-import io
 import csv
-import json
 import urllib.request
 import urllib.error
+import sys
+
+# Make this add-in's folder importable so the pure-logic module resolves
+# regardless of Fusion's current working directory.
+_ADDIN_DIR = os.path.dirname(os.path.realpath(__file__))
+if _ADDIN_DIR not in sys.path:
+    sys.path.insert(0, _ADDIN_DIR)
+import sheet_core
 
 app = adsk.core.Application.get()
 ui = app.userInterface
@@ -65,72 +71,11 @@ SETTINGS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'setti
 
 
 # --------------------------------------------------------------------------- #
-# Small persistent settings (remembers the last URL / options between runs).
-# --------------------------------------------------------------------------- #
-def load_setting(key, default=''):
-    try:
-        with open(SETTINGS_FILE, 'r') as f:
-            return json.load(f).get(key, default)
-    except Exception:
-        return default
-
-
-def save_setting(data):
-    try:
-        existing = {}
-        if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f:
-                existing = json.load(f)
-        existing.update(data)
-        with open(SETTINGS_FILE, 'w') as f:
-            json.dump(existing, f)
-    except Exception:
-        pass
-
-
-# --------------------------------------------------------------------------- #
 # Google Sheet reading. Works with no extra Python packages by pulling the
 # sheet as CSV over HTTP (Fusion's bundled Python ships urllib + csv).
 # --------------------------------------------------------------------------- #
-SHARING_HELP = (
-    'Make sure the sheet is shared so anyone with the link can read it: in Google '
-    'Sheets, Share > General access > "Anyone with the link" > Viewer. '
-    '(Or publish it: File > Share > Publish to web.) Then paste that link here.')
-
-
-def csv_url_candidates(url):
-    """Turn a share / edit / publish link into one or more CSV-export links.
-
-    We use the ``/export?format=csv`` endpoint, which returns cell values exactly
-    as typed (the ``gviz`` endpoint is avoided because it applies per-column type
-    inference and silently drops units, e.g. "500 mm" becomes empty). For sheets
-    shared as "anyone with the link", supplying a ``gid`` makes the signed
-    redirect fail with HTTP 400, so the default first tab is requested without a
-    gid; a gid is only added when the link explicitly points at a non-first tab.
-    """
-    url = url.strip()
-    if 'output=csv' in url or 'format=csv' in url:
-        return [url]
-    # Published-to-web URL: .../d/e/<id>/pub...
-    if re.search(r'/spreadsheets/d/e/[^/]+/pub', url):
-        sep = '&' if '?' in url else '?'
-        return [url + sep + 'output=csv']
-    # Standard share/edit URL: .../d/<id>/edit#gid=<gid>
-    m = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
-    if m:
-        sheet_id = m.group(1)
-        base = 'https://docs.google.com/spreadsheets/d/{}/export?format=csv'.format(sheet_id)
-        gid_match = re.search(r'[#&?]gid=(\d+)', url)
-        gid = gid_match.group(1) if gid_match else None
-        if gid and gid != '0':
-            # A specific tab was requested. Try it, then fall back to the first tab.
-            return [base + '&gid=' + gid, base]
-        return [base]
-    return [url]
-
-
 def fetch_rows(url):
-    candidates = csv_url_candidates(url)
+    candidates = sheet_core.csv_url_candidates(url)
     raw = None
     last_err = None
     for csv_url in candidates:
@@ -145,34 +90,14 @@ def fetch_rows(url):
             last_err = str(e.reason)
 
     if raw is None:
-        raise RuntimeError(
-            'Could not download the sheet ({}).\n\n{}'.format(last_err or 'unknown error', SHARING_HELP))
-
-    head = raw.lstrip()[:200].lower()
-    if head.startswith('<!doctype html') or '<html' in head:
-        raise RuntimeError(
-            'That URL returned a web page instead of CSV, which usually means the '
-            'sheet is not readable without signing in.\n\n' + SHARING_HELP)
-
-    rows = [r for r in csv.reader(io.StringIO(raw)) if any(c.strip() for c in r)]
-    if len(rows) < 2:
-        raise RuntimeError('The sheet needs a header row plus at least one variant row.')
-    return rows
+        raise RuntimeError('Could not download the sheet ({}).\n\n{}'.format(
+            last_err or 'unknown error', sheet_core.SHARING_HELP))
+    return sheet_core.parse_sheet_csv(raw)
 
 
 # --------------------------------------------------------------------------- #
 # Core work.
 # --------------------------------------------------------------------------- #
-def unquote_text(expression):
-    """Strip the surrounding single/double quotes from a text-parameter
-    expression so the sheet shows the bare value (e.g. 'A-6' -> A-6). Leaves
-    numeric expressions like '50 mm' untouched."""
-    s = (expression or '').strip()
-    if len(s) >= 2 and s[0] in ("'", '"') and s[-1] == s[0]:
-        return s[1:-1]
-    return expression
-
-
 def apply_expression(param, raw):
     """Write a sheet cell into a parameter's expression.
 
@@ -359,7 +284,7 @@ def create_template(use_favorites):
     # without their surrounding quotes (so 'A-6' becomes A-6) to keep the sheet
     # tidy; the quotes are re-added automatically on import based on the model's
     # parameter type, so a value can even be a number used as engraving text.
-    example = ['Variant_1'] + [unquote_text(p.expression) for p in params]
+    example = ['Variant_1'] + [sheet_core.unquote_text(p.expression) for p in params]
 
     with open(path, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -382,7 +307,11 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 ui.messageBox('Please paste the Google Sheet URL.')
                 return
 
-            save_setting({'sheet_url': url, 'spacing_mm': spacing_cm * 10.0})
+            sheet_core.save_settings(SETTINGS_FILE, {
+                'sheet_url': url,
+                'spacing_mm': spacing_cm * 10.0,
+                'profiles': sheet_core.default_profiles(),
+            })
             count = build_assembly(url, spacing_cm)
 
             ui.messageBox('Done. Created an assembly with {} variant component(s).'.format(count))
@@ -398,10 +327,12 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             cmd.setDialogInitialSize(460, 180)
             inputs = cmd.commandInputs
 
-            url_in = inputs.addStringValueInput('sheetUrl', 'Google Sheet URL', load_setting('sheet_url', ''))
+            settings = sheet_core.load_settings(SETTINGS_FILE)
+            url_in = inputs.addStringValueInput('sheetUrl', 'Google Sheet URL',
+                                                settings.get('sheet_url', ''))
             url_in.tooltip = 'Share link or published-to-web CSV link of the sheet that holds your variants.'
 
-            default_mm = float(load_setting('spacing_mm', 100.0))
+            default_mm = float(settings.get('spacing_mm', 100.0))
             spacing_in = inputs.addValueInput(
                 'spacing', 'Gap between variants (mm)', 'mm',
                 adsk.core.ValueInput.createByReal(default_mm / 10.0))
