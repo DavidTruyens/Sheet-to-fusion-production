@@ -5,6 +5,7 @@
 import re
 import io
 import csv
+import json
 
 SHARING_HELP = (
     'Make sure the sheet is shared so anyone with the link can read it: in Google '
@@ -64,3 +65,63 @@ def unquote_text(expression):
     if len(s) >= 2 and s[0] in ("'", '"') and s[-1] == s[0]:
         return s[1:-1]
     return expression
+
+
+VALID_RULES = ("whole_model", "named_components")
+
+
+def default_profiles():
+    return [{"id": "p1", "name": "Full model", "enabled": True,
+             "rule": "whole_model", "components": []}]
+
+
+def _normalize_profile(raw, fallback_id):
+    raw = raw if isinstance(raw, dict) else {}
+    rule = raw.get("rule") if raw.get("rule") in VALID_RULES else "whole_model"
+    comps = [str(c).strip() for c in (raw.get("components") or []) if str(c).strip()]
+    return {
+        "id": str(raw.get("id") or fallback_id),
+        "name": str(raw.get("name") or "Export"),
+        "enabled": bool(raw.get("enabled", True)),
+        "rule": rule,
+        "components": comps,
+    }
+
+
+def migrate_settings(data):
+    """Return a copy of the settings dict with a well-formed 'profiles' list.
+    Missing/empty profiles yield the single default whole-model profile so
+    upgrading users reproduce today's behaviour exactly."""
+    data = dict(data or {})
+    profiles = data.get("profiles")
+    if not isinstance(profiles, list) or not profiles:
+        data["profiles"] = default_profiles()
+    else:
+        data["profiles"] = [_normalize_profile(p, "p%d" % (i + 1))
+                            for i, p in enumerate(profiles)]
+    return data
+
+
+def load_settings(path):
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    return migrate_settings(data)
+
+
+def save_settings(path, data):
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def next_profile_id(existing_ids):
+    existing = set(existing_ids or [])
+    n = 1
+    while ("p%d" % n) in existing:
+        n += 1
+    return "p%d" % n
