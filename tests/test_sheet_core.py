@@ -120,3 +120,30 @@ def test_migrate_dedupes_colliding_ids():
     ids = [p["id"] for p in out["profiles"]]
     assert len(ids) == len(set(ids))
     assert ids[0] == "p2"
+
+
+def test_select_splits_present_and_missing_preserving_order():
+    included, missing = sheet_core.select_component_names(
+        ["Nis", "Gordijnplaat"], ["Gordijnplaat", "Ghost"])
+    assert included == ["Gordijnplaat"]
+    assert missing == ["Ghost"]
+
+
+def test_select_empty_targets():
+    assert sheet_core.select_component_names(["A"], []) == ([], [])
+
+
+def test_summarize_built_and_skipped():
+    text = sheet_core.summarize_results([
+        {"name": "Full model", "built": 5, "warnings": [], "skipped": False},
+        {"name": "Prod", "built": 0, "warnings": ["component(s) not found: X"],
+         "skipped": True},
+    ])
+    assert "Full model" in text
+    assert "5" in text
+    assert "Skipped" in text
+    assert "X" in text
+
+
+def test_summarize_nothing_built():
+    assert sheet_core.summarize_results([]) == "Nothing was built."

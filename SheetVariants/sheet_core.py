@@ -135,3 +135,32 @@ def next_profile_id(existing_ids):
     while ("p%d" % n) in existing:
         n += 1
     return "p%d" % n
+
+
+def select_component_names(present, targets):
+    """Split target component names into (included, missing) against the names
+    present in the design, preserving the order of ``targets``."""
+    present_set = set(present or [])
+    included, missing = [], []
+    for name in (targets or []):
+        (included if name in present_set else missing).append(name)
+    return included, missing
+
+
+def summarize_results(results):
+    """Build the end-of-run message box text from per-profile result dicts."""
+    lines = []
+    built = [r for r in results if not r.get("skipped")]
+    if built:
+        lines.append("Built:")
+        for r in built:
+            warn = (" — " + "; ".join(r["warnings"])) if r.get("warnings") else ""
+            lines.append("  • {} ({} variant(s)){}".format(r.get("name", "Export"),
+                                                           r.get("built", 0), warn))
+    skipped = [r for r in results if r.get("skipped")]
+    if skipped:
+        lines.append("Skipped:")
+        for r in skipped:
+            reason = "; ".join(r["warnings"]) if r.get("warnings") else "nothing to export"
+            lines.append("  • {} — {}".format(r.get("name", "Export"), reason))
+    return "\n".join(lines) if lines else "Nothing was built."
