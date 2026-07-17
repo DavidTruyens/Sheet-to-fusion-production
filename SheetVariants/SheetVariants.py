@@ -36,6 +36,10 @@ ui = app.userInterface
 # Keep event handlers referenced so Python does not garbage-collect them.
 _handlers = []
 
+# Component names of the active design at the moment the Build dialog opened,
+# used to populate each named-components profile's checkbox-dropdown.
+_component_name_cache = []
+
 CMD_ID = 'sheetVariantsBuildAssemblyCmd'
 CMD_NAME = 'Build Variants Assembly from Sheet'
 CMD_DESC = ('Reads model variants from a Google Sheet, applies the parameters, '
@@ -319,6 +323,62 @@ def build_exports(sheet_url, spacing_cm, profiles):
 
 
 # --------------------------------------------------------------------------- #
+# Build dialog profiles-table helpers.
+# --------------------------------------------------------------------------- #
+def _rule_is_named(rule_input):
+    item = rule_input.selectedItem
+    return bool(item and item.name.startswith('Named'))
+
+
+def _add_profile_row(table, profile):
+    """Append one profile as a table row: [enabled | name | rule | components]."""
+    ci = table.commandInputs
+    pid = profile['id']
+    row = table.rowCount
+
+    en = ci.addBoolValueInput('en_' + pid, 'Enabled', True, '', bool(profile.get('enabled', True)))
+    nm = ci.addStringValueInput('nm_' + pid, 'Name', profile.get('name', ''))
+    rl = ci.addDropDownCommandInput('rl_' + pid, 'Rule', adsk.core.DropDownStyles.TextListDropDownStyle)
+    is_named = profile.get('rule') == 'named_components'
+    rl.listItems.add('Whole model', not is_named)
+    rl.listItems.add('Named components', is_named)
+
+    cp = ci.addDropDownCommandInput('cp_' + pid, 'Components', adsk.core.DropDownStyles.CheckBoxDropDownStyle)
+    selected = set(profile.get('components', []))
+    for cn in _component_name_cache:
+        cp.listItems.add(cn, cn in selected)
+    for cn in profile.get('components', []):   # keep saved-but-absent names visible
+        if cn not in _component_name_cache:
+            cp.listItems.add(cn + ' (missing)', True)
+    cp.isVisible = is_named
+
+    table.addCommandInput(en, row, 0)
+    table.addCommandInput(nm, row, 1)
+    table.addCommandInput(rl, row, 2)
+    table.addCommandInput(cp, row, 3)
+
+
+def _read_profiles(table):
+    """Read the table back into a list of profile dicts."""
+    profiles = []
+    for r in range(table.rowCount):
+        en = table.getInputAtPosition(r, 0)
+        nm = table.getInputAtPosition(r, 1)
+        rl = table.getInputAtPosition(r, 2)
+        cp = table.getInputAtPosition(r, 3)
+        pid = nm.id[3:]   # strip 'nm_'
+        rule = 'named_components' if _rule_is_named(rl) else 'whole_model'
+        comps = []
+        for k in range(cp.listItems.count):
+            it = cp.listItems.item(k)
+            if it.isSelected:
+                comps.append(it.name.replace(' (missing)', ''))
+        profiles.append({'id': pid, 'name': nm.value or ('Export ' + pid),
+                         'enabled': en.value, 'rule': rule, 'components': comps})
+    return profiles
+
+
+# --------------------------------------------------------------------------- #
 # Sheet template generation from the model's favorite (or user) parameters.
 # --------------------------------------------------------------------------- #
 def collect_parameters(use_favorites):
@@ -391,9 +451,10 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 return
 
             settings = sheet_core.load_settings(SETTINGS_FILE)
-            profiles = settings['profiles']
+            profiles = _read_profiles(inputs.itemById('profiles'))
             settings['sheet_url'] = url
             settings['spacing_mm'] = spacing_cm * 10.0
+            settings['profiles'] = profiles
             sheet_core.save_settings(SETTINGS_FILE, settings)
             results = build_exports(url, spacing_cm, profiles)
             ui.messageBox(sheet_core.summarize_results(results))
@@ -405,26 +466,81 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
 class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
+            global _component_name_cache
             cmd = args.command
-            cmd.setDialogInitialSize(460, 180)
+            cmd.setDialogInitialSize(560, 360)
             inputs = cmd.commandInputs
 
             settings = sheet_core.load_settings(SETTINGS_FILE)
-            url_in = inputs.addStringValueInput('sheetUrl', 'Google Sheet URL',
-                                                settings.get('sheet_url', ''))
+
+            url_in = inputs.addStringValueInput('sheetUrl', 'Google Sheet URL', settings.get('sheet_url', ''))
             url_in.tooltip = 'Share link or published-to-web CSV link of the sheet that holds your variants.'
 
             default_mm = float(settings.get('spacing_mm', 100.0))
-            spacing_in = inputs.addValueInput(
-                'spacing', 'Gap between variants (mm)', 'mm',
-                adsk.core.ValueInput.createByReal(default_mm / 10.0))
+            spacing_in = inputs.addValueInput('spacing', 'Gap between variants (mm)', 'mm',
+                                              adsk.core.ValueInput.createByReal(default_mm / 10.0))
             spacing_in.tooltip = ('Clear space left between each variant\'s bounding box along X. '
-                                  'Each variant is placed right after the previous one plus this gap; '
-                                  'set 0 to butt them together.')
+                                  'Set 0 to butt them together.')
+
+            # Cache the active design's component names for the checkbox-dropdowns.
+            src = adsk.fusion.Design.cast(app.activeProduct)
+            _component_name_cache = component_names(src) if src else []
+
+            table = inputs.addTableCommandInput('profiles', 'Export profiles', 4, '1:3:2:3')
+            table.minimumVisibleRows = 2
+            table.maximumVisibleRows = 8
+            table.columnSpacing = 1
+            table.rowSpacing = 1
+
+            add_btn = inputs.addBoolValueInput('profileAdd', 'Add', False, '', False)
+            add_btn.tooltip = 'Add an export profile'
+            del_btn = inputs.addBoolValueInput('profileDelete', 'Remove', False, '', False)
+            del_btn.tooltip = 'Remove the selected export profile'
+            table.addToolbarCommandInput(add_btn)
+            table.addToolbarCommandInput(del_btn)
+
+            for profile in settings['profiles']:
+                _add_profile_row(table, profile)
+
+            if not _component_name_cache:
+                note = inputs.addTextBoxCommandInput('compNote', '', '', 2, True)
+                note.text = ('Open your source design before running to pick components '
+                             'for "Named components" profiles.')
 
             on_exec = CommandExecuteHandler()
             cmd.execute.add(on_exec)
             _handlers.append(on_exec)
+
+            on_changed = BuildInputChangedHandler()
+            cmd.inputChanged.add(on_changed)
+            _handlers.append(on_changed)
+        except Exception:
+            if ui:
+                ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
+
+
+class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
+    def notify(self, args):
+        try:
+            changed = args.input
+            table = args.inputs.itemById('profiles')
+            if table is None:
+                return
+            if changed.id == 'profileAdd':
+                existing = [table.getInputAtPosition(r, 1).id[3:] for r in range(table.rowCount)]
+                pid = sheet_core.next_profile_id(existing)
+                _add_profile_row(table, {'id': pid, 'name': 'Export ' + pid,
+                                         'enabled': True, 'rule': 'whole_model', 'components': []})
+            elif changed.id == 'profileDelete':
+                if table.selectedRow >= 0:
+                    table.deleteRow(table.selectedRow)
+            elif changed.id.startswith('rl_'):
+                pid = changed.id[3:]
+                for r in range(table.rowCount):
+                    cp = table.getInputAtPosition(r, 3)
+                    if cp.id == 'cp_' + pid:
+                        cp.isVisible = _rule_is_named(changed)
+                        break
         except Exception:
             if ui:
                 ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
