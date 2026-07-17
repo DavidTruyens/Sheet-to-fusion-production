@@ -139,7 +139,63 @@ def iter_solid_bodies(design):
                 yield b
 
 
-def build_assembly(sheet_url, spacing_cm):
+def component_names(design):
+    """Distinct component names in the active design (order of first appearance)."""
+    names, seen = [], set()
+    for occ in design.rootComponent.allOccurrences:
+        try:
+            n = occ.component.name
+        except Exception:
+            continue
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+    return names
+
+
+def resolve_whole_model(design, profile):
+    """Every solid body in the design (root plus all occurrences)."""
+    return list(iter_solid_bodies(design)), []
+
+
+def _component_solid_bodies(design, included_names):
+    """Solid bodies of the selected components — one representative occurrence
+    per component name, so a part exports once rather than once per instance."""
+    wanted = set(included_names)
+    got = {}
+    for occ in design.rootComponent.allOccurrences:
+        try:
+            cname = occ.component.name
+        except Exception:
+            continue
+        if cname in wanted and cname not in got:
+            bodies = [b for b in occ.bRepBodies if b.isSolid]
+            if bodies:
+                got[cname] = bodies
+    out = []
+    for name in included_names:
+        out.extend(got.get(name, []))
+    return out
+
+
+def resolve_named_components(design, profile):
+    present = component_names(design)
+    included, missing = sheet_core.select_component_names(present, profile.get('components', []))
+    warnings = []
+    if missing:
+        warnings.append("component(s) not found: " + ", ".join(missing))
+    return _component_solid_bodies(design, included), warnings
+
+
+RESOLVERS = {
+    'whole_model': resolve_whole_model,
+    'named_components': resolve_named_components,
+}
+
+
+def build_exports(sheet_url, spacing_cm, profiles):
+    """Build one new design per enabled profile. Recomputes each variant once
+    and feeds every profile. Returns per-profile result dicts for reporting."""
     rows = fetch_rows(sheet_url)
     header = [h.strip() for h in rows[0]]
     if not header or not header[0]:
@@ -155,23 +211,39 @@ def build_assembly(sheet_url, spacing_cm):
     if missing:
         raise RuntimeError('These columns do not match any parameter in the model: ' + ', '.join(missing))
 
-    # Snapshot original expressions so we can restore the source model afterwards.
-    original = {p: all_params.itemByName(p).expression for p in param_names}
+    enabled = [p for p in profiles if p.get('enabled')]
+    if not enabled:
+        raise RuntimeError('No export profiles are enabled. Enable at least one profile and run again.')
 
-    # Assemble into a brand-new design document. Geometry is copied directly as
-    # temporary BReps (no SAT/STEP export), so this also works on the Fusion
-    # Personal licence, which restricts file exports.
-    new_doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
-    new_design = adsk.fusion.Design.cast(new_doc.products.itemByProductType('DesignProductType'))
-    root = new_design.rootComponent
+    original = {p: all_params.itemByName(p).expression for p in param_names}
     tbm = adsk.fusion.TemporaryBRepManager.get()
+
+    # One build context per enabled profile; pre-validate selections.
+    present = component_names(src_design)
+    contexts = []
+    for prof in enabled:
+        ctx = {'profile': prof, 'name': prof.get('name') or 'Export', 'design': None,
+               'root': None, 'x_cursor': 0.0, 'built': 0, 'warnings': [], 'skipped': False}
+        if prof.get('rule') not in RESOLVERS:
+            ctx['skipped'] = True
+            ctx['warnings'] = ["unknown rule '{}'".format(prof.get('rule'))]
+        elif prof.get('rule') == 'named_components':
+            included, miss = sheet_core.select_component_names(present, prof.get('components', []))
+            if miss:
+                ctx['warnings'].append("component(s) not found: " + ", ".join(miss))
+            if not included:
+                ctx['skipped'] = True
+                ctx['warnings'] = ['no matching components in this design']
+        contexts.append(ctx)
+
+    active = [c for c in contexts if not c['skipped']]
+    if not active:
+        return contexts
 
     progress = ui.createProgressDialog()
     progress.isCancelButtonShown = True
-    progress.show('Building variants', 'Building %v of %m', 0, len(rows) - 1, 0)
+    progress.show('Building exports', 'Variant %v of %m', 0, len(rows) - 1, 0)
 
-    built = 0
-    x_cursor = 0.0   # running left edge for the next variant, internal cm
     try:
         for i, row in enumerate(rows[1:]):
             if progress.wasCancelled:
@@ -186,41 +258,49 @@ def build_assembly(sheet_url, spacing_cm):
                     val = row[col].strip()
                     if val:
                         apply_expression(all_params.itemByName(pname), val)
-            adsk.doEvents()  # let the parametric model recompute
+            adsk.doEvents()  # single recompute shared by all profiles
 
-            # Snapshot the source solids as standalone temporary BReps.
-            temp_bodies = []
-            for body in iter_solid_bodies(src_design):
+            for ctx in active:
+                resolver = RESOLVERS[ctx['profile']['rule']]
+                src_bodies, _warn = resolver(src_design, ctx['profile'])
+                temp_bodies = []
+                for body in src_bodies:
+                    try:
+                        temp_bodies.append(tbm.copy(body))
+                    except Exception:
+                        pass
+                if not temp_bodies:
+                    continue
+
+                if ctx['design'] is None:   # create output design lazily
+                    new_doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+                    nd = adsk.fusion.Design.cast(new_doc.products.itemByProductType('DesignProductType'))
+                    ctx['design'] = nd
+                    ctx['root'] = nd.rootComponent
+                    try:
+                        nd.rootComponent.name = ctx['name']
+                    except Exception:
+                        pass
+
+                root = ctx['root']
+                min_x = min(tb.boundingBox.minPoint.x for tb in temp_bodies)
+                max_x = max(tb.boundingBox.maxPoint.x for tb in temp_bodies)
+                transform = adsk.core.Matrix3D.create()
+                transform.translation = adsk.core.Vector3D.create(ctx['x_cursor'] - min_x, 0.0, 0.0)
+                occ = root.occurrences.addNewComponent(transform)
+                occ.component.name = safe_name
+                base = occ.component.features.baseFeatures.add()
+                base.startEdit()
                 try:
-                    temp_bodies.append(tbm.copy(body))
-                except Exception:
-                    pass
-            if not temp_bodies:
-                continue
+                    for tb in temp_bodies:
+                        occ.component.bRepBodies.add(tb, base)
+                finally:
+                    base.finishEdit()
+                ctx['x_cursor'] += (max_x - min_x) + spacing_cm
+                ctx['built'] += 1
 
-            # Lay variants out along X with a fixed gap between their bounding
-            # boxes: shift this variant so its left edge sits at x_cursor.
-            min_x = min(tb.boundingBox.minPoint.x for tb in temp_bodies)
-            max_x = max(tb.boundingBox.maxPoint.x for tb in temp_bodies)
-
-            transform = adsk.core.Matrix3D.create()
-            transform.translation = adsk.core.Vector3D.create(x_cursor - min_x, 0.0, 0.0)
-            occ = root.occurrences.addNewComponent(transform)   # one component per variant
-            occ.component.name = safe_name
-
-            base = occ.component.features.baseFeatures.add()
-            base.startEdit()
-            try:
-                for tb in temp_bodies:
-                    occ.component.bRepBodies.add(tb, base)
-            finally:
-                base.finishEdit()
-
-            x_cursor += (max_x - min_x) + spacing_cm
-            built += 1
             progress.progressValue = i + 1
     finally:
-        # Always put the source model back the way we found it.
         for p, expr in original.items():
             try:
                 all_params.itemByName(p).expression = expr
@@ -229,10 +309,13 @@ def build_assembly(sheet_url, spacing_cm):
         adsk.doEvents()
         progress.hide()
 
-    if built == 0:
-        raise RuntimeError('No variants were built. Does the source model contain at least one solid body?')
+    for ctx in active:
+        if ctx['built'] == 0 and not ctx['skipped']:
+            ctx['skipped'] = True
+            if not ctx['warnings']:
+                ctx['warnings'] = ['no solid bodies matched']
 
-    return built
+    return contexts
 
 
 # --------------------------------------------------------------------------- #
@@ -307,14 +390,13 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 ui.messageBox('Please paste the Google Sheet URL.')
                 return
 
-            sheet_core.save_settings(SETTINGS_FILE, {
-                'sheet_url': url,
-                'spacing_mm': spacing_cm * 10.0,
-                'profiles': sheet_core.default_profiles(),
-            })
-            count = build_assembly(url, spacing_cm)
-
-            ui.messageBox('Done. Created an assembly with {} variant component(s).'.format(count))
+            settings = sheet_core.load_settings(SETTINGS_FILE)
+            profiles = settings['profiles']
+            settings['sheet_url'] = url
+            settings['spacing_mm'] = spacing_cm * 10.0
+            sheet_core.save_settings(SETTINGS_FILE, settings)
+            results = build_exports(url, spacing_cm, profiles)
+            ui.messageBox(sheet_core.summarize_results(results))
         except Exception:
             if ui:
                 ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
