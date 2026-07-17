@@ -4,8 +4,9 @@
 
 A [Autodesk Fusion](https://www.autodesk.com/products/fusion-360/) add-in that turns a
 Google Sheet of parameter values into a production assembly. It reads every variant
-row, applies the parameters to your parametric model, and drops a copy of each
-variant into a new design as a separate component.
+row, applies the parameters to your parametric model, and builds each of your named
+**export profiles** — the whole model, or just a chosen subset of components — into
+its own new design, one component per variant.
 
 It can also generate the sheet **template** straight from the model's favorite
 parameters, so the column names always match.
@@ -17,7 +18,12 @@ parameters, so the column names always match.
 - **Create Variant Sheet Template** — writes a CSV whose columns are the model's
   favorite (or all user) parameters, seeded with the current values as an example.
 - **Build Variants Assembly from Sheet** — reads a Google Sheet, applies each row's
-  parameters, and assembles a copy of every variant into a new design.
+  parameters, and runs every enabled **export profile**, each producing its own new
+  design with one component per variant.
+- **Export profiles** — named, editable rows in the Build dialog. Each profile picks
+  a selection rule: **Whole model** (every solid body, the classic behaviour) or
+  **Named components** (only the ticked components from the source design). Profiles
+  are saved to `settings.json` so they persist between runs.
 - No Google Cloud project or API key: the sheet is read as CSV over HTTP.
 - Geometry is copied in-memory (no SAT/STEP export), so it also works on the
   **Fusion Personal** licence, which restricts file exports.
@@ -80,10 +86,36 @@ A ready-to-use sample is in [`examples/variants_example.csv`](examples/variants_
 3. In Google Sheets: **File → Import → Upload** the CSV; add one row per variant.
    Share the sheet ("Anyone with the link") or publish it to the web as CSV.
 4. Open your source model, run **Build Variants Assembly from Sheet**, paste the
-   sheet link, set the gap between variants, and run.
+   sheet link, set the gap between variants, check your export profiles (see
+   below), and run.
 
-A new untitled design opens with one named component per variant, laid out
-left-to-right with the gap you chose between each one's bounding box.
+For each *enabled* profile, a new untitled design opens named after that profile,
+with one named component per variant, laid out left-to-right with the gap you
+chose between each one's bounding box.
+
+## Export profiles
+
+The Build dialog has an **Export profiles** table — one row per output design.
+Each row has:
+
+- **Enabled** — untick to skip a profile without deleting it.
+- **Name** — used as the new design's name.
+- **Rule** — **Whole model** (every solid body, root plus occurrences) or
+  **Named components** — pick which components go into this export from a
+  checklist of the source design's current components.
+- **Components** — only shown/used for Named components; the picker lists the
+  components in the active design when the dialog opened.
+
+Use **Add**/**Remove** to add or delete profile rows. Profiles are saved to
+`settings.json` alongside the sheet link and spacing, so they're remembered next
+time you open the dialog.
+
+If a Named-components profile references a component that no longer exists in
+the model (renamed or deleted), that component is **warned about, not fatal**:
+the run continues, the missing name is listed in that profile's line of the
+summary, and the rest of the profile still builds from whatever components
+were found. A profile is only skipped entirely if none of its components (or,
+for Whole model, no solid bodies at all) are found.
 
 ## How the Google connection works
 

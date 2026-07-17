@@ -1,7 +1,12 @@
 # SheetVariants.py
 # Fusion add-in: read parametric variants from a Google Sheet, apply the
-# parameters to the active model, export each variant as SAT, then assemble
-# all variants as separate components in a new design document.
+# parameters to the active model, and build one new design per enabled
+# export profile — each profile's design gets one component per variant,
+# laid out left-to-right by bounding box. A profile selects either the
+# whole model (every solid body) or a named subset of the model's
+# components; profiles are edited in the Build dialog's table and saved to
+# settings.json. Geometry is copied in-memory (TemporaryBRepManager), never
+# exported to SAT/STEP/DXF, so the add-in still works on Fusion Personal.
 #
 # Sheet layout (one variant per row):
 #   | Name      | length | width | height | ...   |   <- header row
