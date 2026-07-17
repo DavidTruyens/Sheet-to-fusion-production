@@ -3,6 +3,8 @@
 # import adsk so it can be imported and unit-tested outside Fusion.
 
 import re
+import io
+import csv
 
 SHARING_HELP = (
     'Make sure the sheet is shared so anyone with the link can read it: in Google '
@@ -35,3 +37,30 @@ def csv_url_candidates(url):
             return [base + '&gid=' + gid, base]
         return [base]
     return [url]
+
+
+def parse_sheet_csv(raw):
+    """Parse downloaded CSV text into a list of non-empty rows.
+
+    Raises RuntimeError if the text looks like an HTML page (usually a sign-in
+    wall) or does not contain at least a header plus one data row.
+    """
+    head = raw.lstrip()[:200].lower()
+    if head.startswith('<!doctype html') or '<html' in head:
+        raise RuntimeError(
+            'That URL returned a web page instead of CSV, which usually means the '
+            'sheet is not readable without signing in.\n\n' + SHARING_HELP)
+    rows = [r for r in csv.reader(io.StringIO(raw)) if any(c.strip() for c in r)]
+    if len(rows) < 2:
+        raise RuntimeError('The sheet needs a header row plus at least one variant row.')
+    return rows
+
+
+def unquote_text(expression):
+    """Strip surrounding single/double quotes from a text-parameter expression
+    (e.g. 'A-6' -> A-6). Leaves numeric expressions like '50 mm' untouched and
+    passes None through unchanged."""
+    s = (expression or '').strip()
+    if len(s) >= 2 and s[0] in ("'", '"') and s[-1] == s[0]:
+        return s[1:-1]
+    return expression
