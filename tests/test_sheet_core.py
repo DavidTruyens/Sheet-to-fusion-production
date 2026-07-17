@@ -110,3 +110,13 @@ def test_next_profile_id_skips_used():
 
 def test_next_profile_id_fills_gap():
     assert sheet_core.next_profile_id(["p1", "p3"]) == "p2"
+
+
+def test_migrate_dedupes_colliding_ids():
+    out = sheet_core.migrate_settings({"profiles": [
+        {"id": "p2", "name": "A"},
+        {"name": "B"},
+    ]})
+    ids = [p["id"] for p in out["profiles"]]
+    assert len(ids) == len(set(ids))
+    assert ids[0] == "p2"

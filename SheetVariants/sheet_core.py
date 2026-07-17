@@ -79,8 +79,9 @@ def _normalize_profile(raw, fallback_id):
     raw = raw if isinstance(raw, dict) else {}
     rule = raw.get("rule") if raw.get("rule") in VALID_RULES else "whole_model"
     comps = [str(c).strip() for c in (raw.get("components") or []) if str(c).strip()]
+    rid = raw.get("id")
     return {
-        "id": str(raw.get("id") or fallback_id),
+        "id": str(rid) if rid else fallback_id,
         "name": str(raw.get("name") or "Export"),
         "enabled": bool(raw.get("enabled", True)),
         "rule": rule,
@@ -97,8 +98,17 @@ def migrate_settings(data):
     if not isinstance(profiles, list) or not profiles:
         data["profiles"] = default_profiles()
     else:
-        data["profiles"] = [_normalize_profile(p, "p%d" % (i + 1))
-                            for i, p in enumerate(profiles)]
+        normalized = []
+        used_ids = []
+        for p in profiles:
+            prof = _normalize_profile(p if isinstance(p, dict) else {}, None)
+            pid = prof["id"]
+            if not pid or pid in used_ids:
+                pid = next_profile_id(used_ids)
+                prof["id"] = pid
+            used_ids.append(pid)
+            normalized.append(prof)
+        data["profiles"] = normalized
     return data
 
 
