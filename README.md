@@ -24,7 +24,18 @@ parameters, so the column names always match.
   a selection rule: **Whole model** (every solid body, the classic behaviour) or
   **Named components** (only the ticked components from the source design). Profiles
   are saved to `settings.json` so they persist between runs.
-- No Google Cloud project or API key: the sheet is read as CSV over HTTP.
+- **Tab picker for multi-tab sheets** — if the linked sheet has more than one
+  tab, **Load tabs** lists them so you can pick the one with your variants. The
+  choice is pinned per sheet and remembered next time you open that link.
+- **Sheet validation** — a **Check** report matches every column to a model
+  parameter (or flags it), warns about parameters with no column, and flags bad
+  cells (comma decimals, empty values). The **OK/Build** button is disabled
+  until the errors are fixed.
+- **Test a variant on the live model** — apply one sheet row to the open model
+  to eyeball it, then restore just the parameters it touched.
+- No Google Cloud project or API key: multi-tab sheets are fetched once as an
+  XLSX workbook and parsed with the standard library (`zipfile`); single-tab
+  and published-to-web links are still read as CSV.
 - Geometry is copied in-memory (no SAT/STEP export), so it also works on the
   **Fusion Personal** licence, which restricts file exports.
 - Variants are laid out left-to-right with a fixed gap between their bounding boxes,
@@ -85,18 +96,53 @@ A ready-to-use sample is in [`examples/variants_example.csv`](examples/variants_
    save the CSV.
 3. In Google Sheets: **File → Import → Upload** the CSV; add one row per variant.
    Share the sheet ("Anyone with the link") or publish it to the web as CSV.
-4. Open your source model, run **Build Variants Assembly from Sheet**, paste the
-   sheet link, set the gap between variants, check your export profiles (see
-   below), and run.
+4. Open your source model and run **Build Variants Assembly from Sheet** — a
+   3-tab dialog:
+   - **Sheet tab** — paste the sheet link, **Load tabs**, pick the tab with
+     your variants, and clear anything the **Check** report flags.
+   - **Test tab** *(optional)* — apply one variant row to the model to eyeball
+     it, then restore it.
+   - **Output sets tab** — check your export profiles (see below).
+   Click **OK** to build.
 
 For each *enabled* profile, a new untitled design opens named after that profile,
 with one named component per variant, laid out left-to-right with the gap you
 chose between each one's bounding box.
 
+## Picking a sheet tab
+
+If the linked Google Sheet has more than one tab, the **Sheet tab**'s **Load
+tabs** button (above the **Tab** picker) fetches the sheet once as an XLSX
+workbook and lists every tab in it; pick the one with your variant rows. That
+choice is **pinned per sheet** (keyed by the sheet's id) and pre-selected next
+time you open the dialog with the same link. Links with no spreadsheet id — a
+published-to-web or direct-CSV link — have nothing to list; the Tab picker
+shows a single placeholder and the sheet is read as one CSV table instead.
+
+Below the Tab picker, a **Check** report validates the chosen tab against the
+model before you build:
+
+- each column is matched to a model parameter, or flagged if it matches none;
+- model parameters with no matching column are listed as a warning (they keep
+  their current value);
+- cells that look wrong are flagged — a comma decimal like `18,2` is an error
+  (use a dot and a unit instead, e.g. `18.2 mm`), and empty cells are a warning.
+
+While the report has errors, the dialog's **OK/Build** button is disabled; fix
+the sheet (or pick a different tab) until it's clean.
+
+## Test tab
+
+Once a tab is picked, the **Test tab**'s **Variant row** dropdown lists every
+row in it. **Apply to model** writes that row's values into the open model's
+parameters right away, so you can inspect the result; **Restore original
+values** puts them back. Only the parameters that row actually touches are
+changed or restored.
+
 ## Export profiles
 
-The Build dialog has an **Export profiles** table — one row per output design.
-Each row has:
+The Build dialog's **Output sets** tab has an **Export profiles** table — one
+row per output design. Each row has:
 
 - **Enabled** — untick to skip a profile without deleting it.
 - **Name** — used as the new design's name.
@@ -120,9 +166,13 @@ for Whole model, no solid bodies at all) are found.
 ## How the Google connection works
 
 Fusion's bundled Python can't easily install the Google client libraries, so the
-add-in fetches the sheet as CSV using only the standard library (`urllib` + `csv`).
-A normal share/edit link is converted to the `export?format=csv` link automatically;
-a published-to-web CSV link is used as-is. Nothing is written back to the sheet.
+add-in reads the sheet using only the standard library — still no Google API key
+or extra packages. A sheet with tabs to pick from is fetched **once** as an XLSX
+workbook (`export?format=xlsx`) and parsed with `zipfile`; switching tabs or
+trying a row in the Test tab reuses that same download. A single-tab link (no
+tabs to list) or a published-to-web link still uses the original CSV path: it's
+converted to (or already is) an `export?format=csv` link and parsed with `csv`.
+Nothing is written back to the sheet either way.
 
 ## Limitations
 
