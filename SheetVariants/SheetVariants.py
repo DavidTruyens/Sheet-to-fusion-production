@@ -59,6 +59,14 @@ _build_report = {"ok": True}
 # unresolved placeholder.
 CSV_ONLY_TAB_LABEL = "— single sheet (read as CSV) —"
 
+# Bumped on every change so the loaded build is identifiable in the dialog.
+ADDIN_VERSION = '1.1.0'
+
+# The sheet URL is remembered per design (as a document attribute), so each
+# design pre-fills its own sheet and a design with none set stays empty.
+DESIGN_ATTR_GROUP = 'SheetVariants'
+DESIGN_ATTR_URL = 'sheetUrl'
+
 CMD_ID = 'sheetVariantsBuildAssemblyCmd'
 CMD_NAME = 'Build Variants Assembly from Sheet'
 CMD_DESC = ('Reads model variants from a Google Sheet, applies the parameters, '
@@ -173,6 +181,25 @@ def set_pinned_tab(settings, spreadsheet_id, tab):
     pinned = dict(settings.get("pinned_tabs") or {})
     pinned[spreadsheet_id] = tab
     settings["pinned_tabs"] = pinned
+
+
+def load_design_url(design):
+    """The Google Sheet URL remembered on this design, or '' if none is set."""
+    if not design:
+        return ''
+    attr = design.attributes.itemByName(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL)
+    return attr.value if attr else ''
+
+
+def save_design_url(design, url):
+    """Remember the sheet URL on this specific design so it pre-fills next time
+    this design is active. Attributes travel with the saved document."""
+    if not design:
+        return
+    try:
+        design.attributes.add(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL, url or '')
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -551,22 +578,18 @@ def create_template(use_favorites):
 
 
 # --------------------------------------------------------------------------- #
-# Test-tab snapshot persistence. Stored as settings['test_snapshot'], a dict of
-# paramName -> original expression, so "Apply to model" / "Restore original
-# values" survive closing and reopening the dialog.
+# Row cache for the Test-tab live preview. executePreview can fire often, so the
+# selected tab's rows are parsed once per (url, tab) instead of on every frame.
 # --------------------------------------------------------------------------- #
-def _load_test_snapshot():
-    return dict(sheet_core.load_settings(SETTINGS_FILE).get('test_snapshot') or {})
+_rows_cache = {'key': None, 'rows': None}
 
 
-def _save_test_snapshot(snapshot):
-    settings = sheet_core.load_settings(SETTINGS_FILE)
-    settings['test_snapshot'] = snapshot
-    sheet_core.save_settings(SETTINGS_FILE, settings)
-
-
-def _clear_test_snapshot():
-    _save_test_snapshot({})
+def _cached_rows(url, tab_name):
+    key = (url, tab_name)
+    if _rows_cache['key'] != key:
+        _rows_cache['rows'] = get_rows(url, tab_name)
+        _rows_cache['key'] = key
+    return _rows_cache['rows']
 
 
 # --------------------------------------------------------------------------- #
@@ -652,7 +675,7 @@ def _refresh_test_rows(inputs):
         row_dd.listItems.add('— load a tab first —', True)
         return
     try:
-        rows = get_rows(url, tab_name)
+        rows = _cached_rows(url, tab_name)
     except Exception:
         row_dd.listItems.add('— could not read tab —', True)
         return
@@ -661,37 +684,35 @@ def _refresh_test_rows(inputs):
         row_dd.listItems.add(label, i == 0)
 
 
-def _apply_test_row(inputs):
-    """Apply the Test tab's selected variant row to the active model so the
-    user can inspect it, snapshotting only the params it touches."""
+def _preview_test_row(inputs):
+    """Apply the Test tab's selected variant row to the model as a live preview.
+
+    Called only from executePreview, the one place Fusion allows temporary model
+    edits during a command. Changes are NOT marked as a valid result, so Fusion
+    automatically reverts them when the dialog closes — the user inspects the
+    variant while browsing, and the model returns to its original values."""
+    tab_test = _find_input(inputs, 'tabTest')
+    if not (tab_test and tab_test.isActive):
+        return  # only preview while the Test tab is the active tab
     design = adsk.fusion.Design.cast(app.activeProduct)
     if not design:
-        ui.messageBox('Open your parametric source model first.')
         return
     row_item = _find_input(inputs, 'testRow').selectedItem
     if not row_item or row_item.name.startswith('—'):
-        ui.messageBox('Pick a variant row to test.')
         return
-
     url = _find_input(inputs, 'sheetUrl').value.strip()
     tab_name = _selected_tab_name(inputs)
     try:
-        rows = get_rows(url, tab_name)
-    except Exception as e:
-        ui.messageBox('Could not read the sheet:\n{}'.format(e))
+        rows = _cached_rows(url, tab_name)
+    except Exception:
         return
-    header = [h.strip() for h in rows[0]]
-    param_names = header[1:]
+    param_names = [h.strip() for h in rows[0]][1:]
     data = rows[1:]
     idx = row_item.index
     if idx >= len(data):
-        ui.messageBox('Pick a variant row to test.')
         return
     row = data[idx]
-
     all_params = design.allParameters
-    snapshot = _load_test_snapshot()
-    failures = []
     for col, pname in enumerate(param_names, start=1):
         if col >= len(row):
             continue
@@ -699,50 +720,26 @@ def _apply_test_row(inputs):
         if not val:
             continue
         param = all_params.itemByName(pname)
-        if not param:
-            continue
-        if pname not in snapshot:
-            snapshot[pname] = param.expression
-        try:
-            apply_expression(param, val)
-        except Exception as e:
-            failures.append('{}: "{}" ({})'.format(pname, val, str(e).splitlines()[0]))
-    _save_test_snapshot(snapshot)
-    adsk.doEvents()
-
-    msg = 'Applied variant "{}" to the model.'.format(row_item.name)
-    if failures:
-        msg += '\n\nSome cells were rejected:\n  ' + '\n  '.join(failures)
-    msg += '\n\nUse "Restore original values" in the Test tab to put it back.'
-    ui.messageBox(msg)
-
-
-def _restore_test_snapshot():
-    """Restore parameters recorded by _apply_test_row, then clear the snapshot."""
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    if not design:
-        ui.messageBox('Open your parametric source model first.')
-        return
-    snapshot = _load_test_snapshot()
-    if not snapshot:
-        ui.messageBox('Nothing to restore.')
-        return
-    all_params = design.allParameters
-    for pname, expr in snapshot.items():
-        p = all_params.itemByName(pname)
-        if p:
+        if param:
             try:
-                p.expression = expr
+                apply_expression(param, val)
             except Exception:
-                pass
-    adsk.doEvents()
-    _clear_test_snapshot()
-    ui.messageBox('Restored {} parameter(s) to their original values.'.format(len(snapshot)))
+                pass  # a bad cell just doesn't preview; never crash the preview
 
 
 # --------------------------------------------------------------------------- #
 # Command handlers / UI.
 # --------------------------------------------------------------------------- #
+class BuildExecutePreviewHandler(adsk.core.CommandEventHandler):
+    def notify(self, args):
+        try:
+            _preview_test_row(args.command.commandInputs)
+            # Leave args.isValidResult False so the preview reverts on close.
+        except Exception:
+            pass  # a preview must never raise
+
+
+
 class CommandExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         try:
@@ -757,13 +754,14 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
 
             settings = sheet_core.load_settings(SETTINGS_FILE)
             profiles = _read_profiles(_find_input(inputs, 'profiles'))
-            settings['sheet_url'] = url
             settings['spacing_mm'] = spacing_cm * 10.0
             settings['profiles'] = profiles
             sid = sheet_core.extract_spreadsheet_id(url)
             if sid and tab:
                 set_pinned_tab(settings, sid, tab)
             sheet_core.save_settings(SETTINGS_FILE, settings)
+            # Remember this design's sheet URL on the design itself.
+            save_design_url(adsk.fusion.Design.cast(app.activeProduct), url)
             results = build_exports(url, spacing_cm, profiles, tab)
             ui.messageBox(sheet_core.summarize_results(results))
         except Exception:
@@ -781,8 +779,15 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             cmd.setDialogInitialSize(560, 460)
             inputs = cmd.commandInputs
 
+            # Version banner (above the tabs, so it shows on every tab) makes it
+            # obvious which build of the add-in is actually loaded.
+            ver = inputs.addTextBoxCommandInput(
+                'addinVersion', '', 'Sheet Variants — v' + ADDIN_VERSION, 1, True)
+            ver.isFullWidth = True
+
             settings = sheet_core.load_settings(SETTINGS_FILE)
-            url0 = settings.get('sheet_url', '')
+            design0 = adsk.fusion.Design.cast(app.activeProduct)
+            url0 = load_design_url(design0)  # per-design; empty if none set
 
             # --- Sheet tab -------------------------------------------------- #
             tab_sheet = inputs.addTabCommandInput('tabSheet', 'Sheet').children
@@ -818,17 +823,13 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             row_dd = tab_test.addDropDownCommandInput(
                 'testRow', 'Variant row', adsk.core.DropDownStyles.TextListDropDownStyle)
             row_dd.listItems.add('— load a tab first —', True)
-
-            apply_btn = tab_test.addBoolValueInput('testApply', 'Apply to model', False, '', False)
-            apply_btn.tooltip = 'Apply the selected variant row to the active model so you can inspect it.'
-
-            restore_btn = tab_test.addBoolValueInput('testRestore', 'Restore original values', False, '', False)
-            restore_btn.tooltip = 'Put back the parameter values the model had before "Apply to model".'
+            row_dd.tooltip = 'Pick a row to preview it live on the model.'
 
             test_note = tab_test.addTextBoxCommandInput('testNote', '', '', 3, True)
             test_note.isFullWidth = True
-            test_note.text = ('Pick a tab in the Sheet tab first, then choose a row here to try it out. '
-                              'These actions happen immediately and do not need OK.')
+            test_note.text = ('Load a tab in the Sheet tab first, then pick a row here to preview it '
+                              'live on the model. The model reverts to its original values when you '
+                              'close this dialog. (Click OK to build; Cancel to just discard the preview.)')
 
             # --- Output sets tab ---------------------------------------------#
             tab_output = inputs.addTabCommandInput('tabOutput', 'Output sets').children
@@ -865,6 +866,10 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             on_changed = BuildInputChangedHandler()
             cmd.inputChanged.add(on_changed)
             _handlers.append(on_changed)
+
+            on_preview = BuildExecutePreviewHandler()
+            cmd.executePreview.add(on_preview)
+            _handlers.append(on_preview)
 
             on_validate = ValidateInputsHandler()
             cmd.validateInputs.add(on_validate)
@@ -903,10 +908,11 @@ class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
                 url = _find_input(inputs, 'sheetUrl').value.strip()
                 tab_dd = _find_input(inputs, 'tab')
                 # Force a fresh download: the user clicked Load tabs, so any
-                # cached bytes from an earlier fetch in this session must not
-                # mask edits made to the live Google Sheet since then.
+                # cached bytes/rows from an earlier fetch in this session must
+                # not mask edits made to the live Google Sheet since then.
                 _xlsx_cache["url"] = None
                 _xlsx_cache["bytes"] = None
+                _rows_cache["key"] = None
                 try:
                     tabs = list_tabs(url)
                 except Exception as e:
@@ -914,6 +920,8 @@ class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
                         '<font color="#c0392b">{}</font>'.format(str(e))
                     _build_report['ok'] = False
                     return
+                # The URL resolved to a readable sheet: remember it on this design.
+                save_design_url(adsk.fusion.Design.cast(app.activeProduct), url)
                 tab_dd.listItems.clear()
                 if not tabs:
                     tab_dd.listItems.add(CSV_ONLY_TAB_LABEL, True)
@@ -932,12 +940,9 @@ class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
             elif changed.id in ('tab', 'sheetUrl'):
                 _run_build_validation(inputs)
                 _refresh_test_rows(inputs)
-            elif changed.id == 'testApply' and changed.value:
-                changed.value = False
-                _apply_test_row(inputs)
-            elif changed.id == 'testRestore' and changed.value:
-                changed.value = False
-                _restore_test_snapshot()
+            # The Test tab previews the selected row via executePreview; picking
+            # a row fires this handler and then executePreview, so no explicit
+            # apply/restore branch is needed here.
         except Exception:
             if ui:
                 ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
