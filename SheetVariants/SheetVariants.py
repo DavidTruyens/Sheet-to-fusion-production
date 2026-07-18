@@ -106,6 +106,19 @@ FALLBACK_PANEL_ID = 'SolidScriptsAddinsPanel'
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'settings.json')
 
+# Debug log — writes to the user's home folder so a failing build can be
+# diagnosed without attaching a debugger. Share the tail of this file if a build
+# still fails: ~/sheetvariants_debug.log
+_DEBUG_LOG = os.path.join(os.path.expanduser('~'), 'sheetvariants_debug.log')
+
+
+def _dbg(msg):
+    try:
+        with open(_DEBUG_LOG, 'a') as f:
+            f.write(str(msg) + '\n')
+    except Exception:
+        pass
+
 
 # --------------------------------------------------------------------------- #
 # Google Sheet reading. Works with no extra Python packages by pulling the
@@ -192,20 +205,32 @@ def set_pinned_tab(settings, spreadsheet_id, tab):
 def load_design_url(design):
     """The Google Sheet URL remembered on this design, or '' if none is set."""
     if not design:
+        _dbg('load_design_url: no active design')
         return ''
-    attr = design.attributes.itemByName(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL)
-    return attr.value if attr else ''
+    try:
+        attr = design.attributes.itemByName(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL)
+        val = attr.value if attr else ''
+        _dbg('load_design_url: read {!r}'.format(val))
+        return val
+    except Exception:
+        _dbg('load_design_url FAILED:\n' + traceback.format_exc())
+        return ''
 
 
 def save_design_url(design, url):
     """Remember the sheet URL on this specific design so it pre-fills next time
     this design is active. Attributes travel with the saved document."""
     if not design:
+        _dbg('save_design_url: no active design')
         return
     try:
         design.attributes.add(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL, url or '')
+        # Read back to confirm the write actually persisted.
+        chk = design.attributes.itemByName(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL)
+        _dbg('save_design_url: wrote {!r}, read-back {!r}'.format(
+            url, chk.value if chk else None))
     except Exception:
-        pass
+        _dbg('save_design_url FAILED:\n' + traceback.format_exc())
 
 
 # --------------------------------------------------------------------------- #
@@ -366,6 +391,8 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
     # its allParameters ("API Object refers to a deleted Object"). Creating the
     # output document first makes it active and leaves the source in the
     # background, where editing its parameters is safe.
+    _dbg('=== build_exports: {} rows, {} profile(s), tab={!r} ==='.format(
+        len(rows) - 1, len(active), tab_name))
     done = 0
     try:
         for ctx in active:
@@ -378,11 +405,12 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 root.name = ctx['name']
             except Exception:
                 pass
-            all_params = src_design.allParameters  # re-fetch now the source is in the background
+            _dbg("profile '{}' rule={}: doc created".format(ctx['name'], ctx['profile'].get('rule')))
 
             x_cursor = 0.0
             try:
                 for i, row in enumerate(rows[1:]):
+                    _dbg('  row {}: applying {} params'.format(i, len(param_names)))
                     if progress.wasCancelled:
                         raise RuntimeError('Cancelled by user.')
 
@@ -434,9 +462,14 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
 
             if ctx['built'] == 0 and not ctx['warnings']:
                 ctx['warnings'] = ['no solid bodies matched']
+    except Exception:
+        _dbg('BUILD FAILED:\n' + traceback.format_exc())
+        raise
     finally:
         progress.hide()
 
+    _dbg('=== build_exports done: ' + '; '.join(
+        '{}={}'.format(c['name'], c['built']) for c in active) + ' ===')
     return contexts
 
 
