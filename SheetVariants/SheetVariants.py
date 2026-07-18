@@ -358,48 +358,74 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
     progress.show('Building exports', 'Variant %v of %m', 0, len(rows) - 1, 0)
 
     try:
-        for i, row in enumerate(rows[1:]):
-            if progress.wasCancelled:
-                raise RuntimeError('Cancelled by user.')
+        # --- Phase 1: apply each variant to the SOURCE model and snapshot its
+        # solids as standalone temporary BReps. No output document is created
+        # here, so the source design stays active and all_params never goes
+        # stale. (Creating an output document mid-loop was what invalidated
+        # all_params on the next row — the "deleted Object" crash.)
+        try:
+            for i, row in enumerate(rows[1:]):
+                if progress.wasCancelled:
+                    raise RuntimeError('Cancelled by user.')
 
-            raw_name = row[0].strip() if len(row) > 0 else ''
-            name = raw_name or 'Variant_{}'.format(i + 1)
-            safe_name = re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip() or 'Variant_{}'.format(i + 1)
+                raw_name = row[0].strip() if len(row) > 0 else ''
+                name = raw_name or 'Variant_{}'.format(i + 1)
+                safe_name = re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip() or 'Variant_{}'.format(i + 1)
 
-            for col, pname in enumerate(param_names, start=1):
-                if col < len(row):
-                    val = row[col].strip()
-                    if val:
-                        apply_expression(all_params.itemByName(pname), val)
-            adsk.doEvents()  # single recompute shared by all profiles
+                for col, pname in enumerate(param_names, start=1):
+                    if col < len(row):
+                        val = row[col].strip()
+                        if val:
+                            apply_expression(all_params.itemByName(pname), val)
+                adsk.doEvents()  # single recompute shared by all profiles
 
-            for ctx in active:
-                resolver = RESOLVERS[ctx['profile']['rule']]
-                src_bodies, _warn = resolver(src_design, ctx['profile'])
-                temp_bodies = []
-                for body in src_bodies:
-                    try:
-                        temp_bodies.append(tbm.copy(body))
-                    except Exception:
-                        pass
-                if not temp_bodies:
-                    continue
+                for ctx in active:
+                    resolver = RESOLVERS[ctx['profile']['rule']]
+                    src_bodies, _warn = resolver(src_design, ctx['profile'])
+                    temp_bodies = []
+                    for body in src_bodies:
+                        try:
+                            temp_bodies.append(tbm.copy(body))
+                        except Exception:
+                            pass
+                    if temp_bodies:
+                        ctx.setdefault('variants', []).append((safe_name, temp_bodies))
 
-                if ctx['design'] is None:   # create output design lazily
-                    new_doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
-                    nd = adsk.fusion.Design.cast(new_doc.products.itemByProductType('DesignProductType'))
-                    ctx['design'] = nd
-                    ctx['root'] = nd.rootComponent
-                    try:
-                        nd.rootComponent.name = ctx['name']
-                    except Exception:
-                        pass
+                progress.progressValue = i + 1
+        finally:
+            # Always put the source model back the way we found it.
+            for p, expr in original.items():
+                try:
+                    all_params.itemByName(p).expression = expr
+                except Exception:
+                    pass
+            adsk.doEvents()
 
-                root = ctx['root']
+        # --- Phase 2: create one output design per profile and lay out its
+        # snapshots left-to-right. Temporary BReps are document-independent, so
+        # they survive the source restore above and the new-document creation.
+        for ctx in active:
+            variants = ctx.get('variants', [])
+            if not variants:
+                ctx['skipped'] = True
+                if not ctx['warnings']:
+                    ctx['warnings'] = ['no solid bodies matched']
+                continue
+
+            new_doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+            nd = adsk.fusion.Design.cast(new_doc.products.itemByProductType('DesignProductType'))
+            root = nd.rootComponent
+            try:
+                root.name = ctx['name']
+            except Exception:
+                pass
+
+            x_cursor = 0.0
+            for safe_name, temp_bodies in variants:
                 min_x = min(tb.boundingBox.minPoint.x for tb in temp_bodies)
                 max_x = max(tb.boundingBox.maxPoint.x for tb in temp_bodies)
                 transform = adsk.core.Matrix3D.create()
-                transform.translation = adsk.core.Vector3D.create(ctx['x_cursor'] - min_x, 0.0, 0.0)
+                transform.translation = adsk.core.Vector3D.create(x_cursor - min_x, 0.0, 0.0)
                 occ = root.occurrences.addNewComponent(transform)
                 occ.component.name = safe_name
                 base = occ.component.features.baseFeatures.add()
@@ -409,24 +435,10 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                         occ.component.bRepBodies.add(tb, base)
                 finally:
                     base.finishEdit()
-                ctx['x_cursor'] += (max_x - min_x) + spacing_cm
+                x_cursor += (max_x - min_x) + spacing_cm
                 ctx['built'] += 1
-
-            progress.progressValue = i + 1
     finally:
-        for p, expr in original.items():
-            try:
-                all_params.itemByName(p).expression = expr
-            except Exception:
-                pass
-        adsk.doEvents()
         progress.hide()
-
-    for ctx in active:
-        if ctx['built'] == 0 and not ctx['skipped']:
-            ctx['skipped'] = True
-            if not ctx['warnings']:
-                ctx['warnings'] = ['no solid bodies matched']
 
     return contexts
 
