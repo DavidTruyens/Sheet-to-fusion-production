@@ -33,6 +33,10 @@ import sys
 _ADDIN_DIR = os.path.dirname(os.path.realpath(__file__))
 if _ADDIN_DIR not in sys.path:
     sys.path.insert(0, _ADDIN_DIR)
+# Fusion keeps a single Python process alive, so helper modules stay cached in
+# sys.modules across Stop/Run. Drop sheet_core before importing so reloading the
+# add-in always picks up the current file instead of a stale cached version.
+sys.modules.pop('sheet_core', None)
 import sheet_core
 
 app = adsk.core.Application.get()
@@ -44,6 +48,16 @@ _handlers = []
 # Component names of the active design at the moment the Build dialog opened,
 # used to populate each named-components profile's checkbox-dropdown.
 _component_name_cache = []
+
+# Whether the Build dialog's most recent validation pass allows OK to be
+# pressed; written by _run_build_validation, read by ValidateInputsHandler.
+_build_report = {"ok": True}
+
+# Sentinel tab-dropdown label used when list_tabs() finds no selectable tabs
+# (a published-to-web or direct-CSV link); _run_build_validation and
+# _refresh_test_rows treat this one string as "read as CSV" rather than as an
+# unresolved placeholder.
+CSV_ONLY_TAB_LABEL = "— single sheet (read as CSV) —"
 
 CMD_ID = 'sheetVariantsBuildAssemblyCmd'
 CMD_NAME = 'Build Variants Assembly from Sheet'
@@ -102,6 +116,63 @@ def fetch_rows(url):
         raise RuntimeError('Could not download the sheet ({}).\n\n{}'.format(
             last_err or 'unknown error', sheet_core.SHARING_HELP))
     return sheet_core.parse_sheet_csv(raw)
+
+
+# --------------------------------------------------------------------------- #
+# Tab-aware reading. Multi-tab sheets (a real /d/<id>/ spreadsheet link) are
+# fetched once as XLSX (stdlib zipfile, parsed by sheet_core) so a specific tab
+# can be read; single-tab share/publish/direct-CSV links fall back to the CSV
+# export above. sheet_core.py has no adsk dependency and is unit-tested on CI.
+# --------------------------------------------------------------------------- #
+_xlsx_cache = {"url": None, "bytes": None}
+
+
+def _xlsx_bytes_for(url):
+    if _xlsx_cache["url"] != url or _xlsx_cache["bytes"] is None:
+        sid = sheet_core.extract_spreadsheet_id(url)
+        req = urllib.request.Request(sheet_core.xlsx_export_url(sid),
+                                     headers={"User-Agent": "Mozilla/5.0 (FusionAddin)"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            _xlsx_cache["bytes"] = resp.read()
+        _xlsx_cache["url"] = url
+    return _xlsx_cache["bytes"]
+
+
+def list_tabs(url):
+    if not sheet_core.extract_spreadsheet_id(url):
+        return []
+    return sheet_core.parse_workbook_tabs(_xlsx_bytes_for(url))
+
+
+def get_rows(url, tab_name=None):
+    sid = sheet_core.extract_spreadsheet_id(url)
+    if sid and tab_name:
+        rows = sheet_core.read_tab_rows(_xlsx_bytes_for(url), tab_name)
+    else:
+        rows = fetch_rows(url)
+        return rows  # fetch_rows already enforces >=2 rows
+    if len(rows) < 2:
+        raise RuntimeError("The sheet needs a header row plus at least one variant row.")
+    return rows
+
+
+def known_param_names(design):
+    return [p.name for p in design.allParameters]
+
+
+def driveable_param_names(design):
+    favs = [p.name for p in design.allParameters if getattr(p, "isFavorite", False)]
+    return favs if favs else [p.name for p in design.userParameters]
+
+
+def load_pinned_tab(settings, spreadsheet_id):
+    return (settings.get("pinned_tabs") or {}).get(spreadsheet_id, "")
+
+
+def set_pinned_tab(settings, spreadsheet_id, tab):
+    pinned = dict(settings.get("pinned_tabs") or {})
+    pinned[spreadsheet_id] = tab
+    settings["pinned_tabs"] = pinned
 
 
 # --------------------------------------------------------------------------- #
@@ -202,10 +273,42 @@ RESOLVERS = {
 }
 
 
-def build_exports(sheet_url, spacing_cm, profiles):
+def deep_check_values(all_params, param_names, rows):
+    """Try-set each distinct (param, value) and restore; collect rejections."""
+    rejects = []
+    seen = set()
+    originals = {}
+    try:
+        for row in rows:
+            for col, pname in enumerate(param_names, start=1):
+                if col >= len(row):
+                    continue
+                val = row[col].strip()
+                if not val or (pname, val) in seen:
+                    continue
+                seen.add((pname, val))
+                param = all_params.itemByName(pname)
+                if not param:
+                    continue
+                if pname not in originals:
+                    originals[pname] = param.expression
+                try:
+                    apply_expression(param, val)
+                except Exception as e:
+                    rejects.append('{} = "{}": {}'.format(pname, val, str(e).splitlines()[0]))
+    finally:
+        for pname, expr in originals.items():
+            try:
+                all_params.itemByName(pname).expression = expr
+            except Exception:
+                pass
+    return rejects
+
+
+def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
     """Build one new design per enabled profile. Recomputes each variant once
     and feeds every profile. Returns per-profile result dicts for reporting."""
-    rows = fetch_rows(sheet_url)
+    rows = get_rows(sheet_url, tab_name)
     header = [h.strip() for h in rows[0]]
     if not header or not header[0]:
         raise RuntimeError('The first header cell must be "Name".')
@@ -219,6 +322,11 @@ def build_exports(sheet_url, spacing_cm, profiles):
     missing = [p for p in param_names if not all_params.itemByName(p)]
     if missing:
         raise RuntimeError('These columns do not match any parameter in the model: ' + ', '.join(missing))
+
+    rejects = deep_check_values(all_params, param_names, rows[1:])
+    if rejects:
+        raise RuntimeError(
+            'These cell values were rejected by Fusion:\n  ' + '\n  '.join(rejects))
 
     enabled = [p for p in profiles if p.get('enabled')]
     if not enabled:
@@ -443,6 +551,173 @@ def create_template(use_favorites):
 
 
 # --------------------------------------------------------------------------- #
+# Test-tab snapshot persistence. Stored as settings['test_snapshot'], a dict of
+# paramName -> original expression, so "Apply to model" / "Restore original
+# values" survive closing and reopening the dialog.
+# --------------------------------------------------------------------------- #
+def _load_test_snapshot():
+    return dict(sheet_core.load_settings(SETTINGS_FILE).get('test_snapshot') or {})
+
+
+def _save_test_snapshot(snapshot):
+    settings = sheet_core.load_settings(SETTINGS_FILE)
+    settings['test_snapshot'] = snapshot
+    sheet_core.save_settings(SETTINGS_FILE, settings)
+
+
+def _clear_test_snapshot():
+    _save_test_snapshot({})
+
+
+# --------------------------------------------------------------------------- #
+# Build dialog: Sheet-tab validation and Test-tab row list, refreshed
+# immediately (not on OK) as sheetUrl/tab/loadTabs change.
+# --------------------------------------------------------------------------- #
+def _selected_tab_name(inputs):
+    """The chosen 'tab' item's name, or None for any placeholder/sentinel
+    (anything starting with the em-dash used by all of "— click Load tabs —",
+    CSV_ONLY_TAB_LABEL, and "— could not read tab —")."""
+    tab_item = inputs.itemById('tab').selectedItem
+    if not tab_item or tab_item.name.startswith('—'):
+        return None
+    return tab_item.name
+
+
+def _selected_tab_is_csv_only(inputs):
+    """True iff the current 'tab' selection is the CSV_ONLY_TAB_LABEL
+    sentinel specifically, as opposed to a real tab or an unresolved
+    placeholder (e.g. "— click Load tabs —"). Callers that need to tell
+    "CSV-only" apart from "nothing chosen yet" use this alongside
+    _selected_tab_name, which collapses both cases to None."""
+    tab_item = inputs.itemById('tab').selectedItem
+    return bool(tab_item and tab_item.name == CSV_ONLY_TAB_LABEL)
+
+
+def _run_build_validation(inputs):
+    """Refresh the report textbox + _build_report flag from current inputs."""
+    url = inputs.itemById('sheetUrl').value.strip()
+    report_box = inputs.itemById('report')
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if not design:
+        report_box.formattedText = 'Open your parametric source model to validate.'
+        _build_report['ok'] = True
+        return
+    tab_name = _selected_tab_name(inputs)
+    if tab_name is None and not _selected_tab_is_csv_only(inputs):
+        report_box.formattedText = 'Pick a tab to validate the mapping.'
+        _build_report['ok'] = True
+        return
+    try:
+        rows = get_rows(url, tab_name)
+    except Exception as e:
+        report_box.formattedText = '<font color="#c0392b">{}</font>'.format(str(e))
+        _build_report['ok'] = False
+        return
+    rep = sheet_core.validate_mapping(
+        rows[0], rows[1:], known_param_names(design), driveable_param_names(design))
+    report_box.formattedText = rep.to_html()
+    _build_report['ok'] = rep.ok
+
+
+def _refresh_test_rows(inputs):
+    """Repopulate the Test tab's row dropdown from the currently chosen tab."""
+    url = inputs.itemById('sheetUrl').value.strip()
+    row_dd = inputs.itemById('testRow')
+    row_dd.listItems.clear()
+    tab_name = _selected_tab_name(inputs)
+    if tab_name is None and not _selected_tab_is_csv_only(inputs):
+        row_dd.listItems.add('— load a tab first —', True)
+        return
+    try:
+        rows = get_rows(url, tab_name)
+    except Exception:
+        row_dd.listItems.add('— could not read tab —', True)
+        return
+    for i, row in enumerate(rows[1:]):
+        label = (row[0].strip() if row else '') or 'Variant_{}'.format(i + 1)
+        row_dd.listItems.add(label, i == 0)
+
+
+def _apply_test_row(inputs):
+    """Apply the Test tab's selected variant row to the active model so the
+    user can inspect it, snapshotting only the params it touches."""
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if not design:
+        ui.messageBox('Open your parametric source model first.')
+        return
+    row_item = inputs.itemById('testRow').selectedItem
+    if not row_item or row_item.name.startswith('—'):
+        ui.messageBox('Pick a variant row to test.')
+        return
+
+    url = inputs.itemById('sheetUrl').value.strip()
+    tab_name = _selected_tab_name(inputs)
+    try:
+        rows = get_rows(url, tab_name)
+    except Exception as e:
+        ui.messageBox('Could not read the sheet:\n{}'.format(e))
+        return
+    header = [h.strip() for h in rows[0]]
+    param_names = header[1:]
+    data = rows[1:]
+    idx = row_item.index
+    if idx >= len(data):
+        ui.messageBox('Pick a variant row to test.')
+        return
+    row = data[idx]
+
+    all_params = design.allParameters
+    snapshot = _load_test_snapshot()
+    failures = []
+    for col, pname in enumerate(param_names, start=1):
+        if col >= len(row):
+            continue
+        val = row[col].strip()
+        if not val:
+            continue
+        param = all_params.itemByName(pname)
+        if not param:
+            continue
+        if pname not in snapshot:
+            snapshot[pname] = param.expression
+        try:
+            apply_expression(param, val)
+        except Exception as e:
+            failures.append('{}: "{}" ({})'.format(pname, val, str(e).splitlines()[0]))
+    _save_test_snapshot(snapshot)
+    adsk.doEvents()
+
+    msg = 'Applied variant "{}" to the model.'.format(row_item.name)
+    if failures:
+        msg += '\n\nSome cells were rejected:\n  ' + '\n  '.join(failures)
+    msg += '\n\nUse "Restore original values" in the Test tab to put it back.'
+    ui.messageBox(msg)
+
+
+def _restore_test_snapshot():
+    """Restore parameters recorded by _apply_test_row, then clear the snapshot."""
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if not design:
+        ui.messageBox('Open your parametric source model first.')
+        return
+    snapshot = _load_test_snapshot()
+    if not snapshot:
+        ui.messageBox('Nothing to restore.')
+        return
+    all_params = design.allParameters
+    for pname, expr in snapshot.items():
+        p = all_params.itemByName(pname)
+        if p:
+            try:
+                p.expression = expr
+            except Exception:
+                pass
+    adsk.doEvents()
+    _clear_test_snapshot()
+    ui.messageBox('Restored {} parameter(s) to their original values.'.format(len(snapshot)))
+
+
+# --------------------------------------------------------------------------- #
 # Command handlers / UI.
 # --------------------------------------------------------------------------- #
 class CommandExecuteHandler(adsk.core.CommandEventHandler):
@@ -455,13 +730,18 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 ui.messageBox('Please paste the Google Sheet URL.')
                 return
 
+            tab = _selected_tab_name(inputs)
+
             settings = sheet_core.load_settings(SETTINGS_FILE)
             profiles = _read_profiles(inputs.itemById('profiles'))
             settings['sheet_url'] = url
             settings['spacing_mm'] = spacing_cm * 10.0
             settings['profiles'] = profiles
+            sid = sheet_core.extract_spreadsheet_id(url)
+            if sid and tab:
+                set_pinned_tab(settings, sid, tab)
             sheet_core.save_settings(SETTINGS_FILE, settings)
-            results = build_exports(url, spacing_cm, profiles)
+            results = build_exports(url, spacing_cm, profiles, tab)
             ui.messageBox(sheet_core.summarize_results(results))
         except Exception:
             if ui:
@@ -472,34 +752,77 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
             global _component_name_cache
+            _build_report['ok'] = True
+
             cmd = args.command
-            cmd.setDialogInitialSize(560, 360)
+            cmd.setDialogInitialSize(560, 460)
             inputs = cmd.commandInputs
 
             settings = sheet_core.load_settings(SETTINGS_FILE)
+            url0 = settings.get('sheet_url', '')
 
-            url_in = inputs.addStringValueInput('sheetUrl', 'Google Sheet URL', settings.get('sheet_url', ''))
+            # --- Sheet tab -------------------------------------------------- #
+            tab_sheet = inputs.addTabCommandInput('tabSheet', 'Sheet').children
+
+            url_in = tab_sheet.addStringValueInput('sheetUrl', 'Google Sheet URL', url0)
             url_in.tooltip = 'Share link or published-to-web CSV link of the sheet that holds your variants.'
 
+            load_btn = tab_sheet.addBoolValueInput('loadTabs', 'Load tabs', False, '', False)
+            load_btn.tooltip = 'Fetch the sheet and list its tabs.'
+
+            tab_dd = tab_sheet.addDropDownCommandInput(
+                'tab', 'Tab', adsk.core.DropDownStyles.TextListDropDownStyle)
+            tab_dd.tooltip = 'Which worksheet tab holds your variant rows.'
+            sid0 = sheet_core.extract_spreadsheet_id(url0)
+            pinned0 = load_pinned_tab(settings, sid0) if sid0 else ''
+            if pinned0:
+                tab_dd.listItems.add(pinned0, True)
+            else:
+                tab_dd.listItems.add('— click Load tabs —', True)
+
+            report = tab_sheet.addTextBoxCommandInput('report', 'Check', '', 6, True)
+            report.isFullWidth = True
+
             default_mm = float(settings.get('spacing_mm', 100.0))
-            spacing_in = inputs.addValueInput('spacing', 'Gap between variants (mm)', 'mm',
-                                              adsk.core.ValueInput.createByReal(default_mm / 10.0))
+            spacing_in = tab_sheet.addValueInput('spacing', 'Gap between variants (mm)', 'mm',
+                                                 adsk.core.ValueInput.createByReal(default_mm / 10.0))
             spacing_in.tooltip = ('Clear space left between each variant\'s bounding box along X. '
                                   'Set 0 to butt them together.')
+
+            # --- Test tab ----------------------------------------------------#
+            tab_test = inputs.addTabCommandInput('tabTest', 'Test').children
+
+            row_dd = tab_test.addDropDownCommandInput(
+                'testRow', 'Variant row', adsk.core.DropDownStyles.TextListDropDownStyle)
+            row_dd.listItems.add('— load a tab first —', True)
+
+            apply_btn = tab_test.addBoolValueInput('testApply', 'Apply to model', False, '', False)
+            apply_btn.tooltip = 'Apply the selected variant row to the active model so you can inspect it.'
+
+            restore_btn = tab_test.addBoolValueInput('testRestore', 'Restore original values', False, '', False)
+            restore_btn.tooltip = 'Put back the parameter values the model had before "Apply to model".'
+
+            test_note = tab_test.addTextBoxCommandInput('testNote', '', '', 3, True)
+            test_note.isFullWidth = True
+            test_note.text = ('Pick a tab in the Sheet tab first, then choose a row here to try it out. '
+                              'These actions happen immediately and do not need OK.')
+
+            # --- Output sets tab ---------------------------------------------#
+            tab_output = inputs.addTabCommandInput('tabOutput', 'Output sets').children
 
             # Cache the active design's component names for the checkbox-dropdowns.
             src = adsk.fusion.Design.cast(app.activeProduct)
             _component_name_cache = component_names(src) if src else []
 
-            table = inputs.addTableCommandInput('profiles', 'Export profiles', 4, '1:3:2:3')
+            table = tab_output.addTableCommandInput('profiles', 'Export profiles', 4, '1:3:2:3')
             table.minimumVisibleRows = 2
             table.maximumVisibleRows = 8
             table.columnSpacing = 1
             table.rowSpacing = 1
 
-            add_btn = inputs.addBoolValueInput('profileAdd', 'Add', False, '', False)
+            add_btn = tab_output.addBoolValueInput('profileAdd', 'Add', False, '', False)
             add_btn.tooltip = 'Add an export profile'
-            del_btn = inputs.addBoolValueInput('profileDelete', 'Remove', False, '', False)
+            del_btn = tab_output.addBoolValueInput('profileDelete', 'Remove', False, '', False)
             del_btn.tooltip = 'Remove the selected export profile'
             table.addToolbarCommandInput(add_btn)
             table.addToolbarCommandInput(del_btn)
@@ -508,7 +831,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 _add_profile_row(table, profile)
 
             if not _component_name_cache:
-                note = inputs.addTextBoxCommandInput('compNote', '', '', 2, True)
+                note = tab_output.addTextBoxCommandInput('compNote', '', '', 2, True)
                 note.text = ('Open your source design before running to pick components '
                              'for "Named components" profiles.')
 
@@ -519,6 +842,10 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             on_changed = BuildInputChangedHandler()
             cmd.inputChanged.add(on_changed)
             _handlers.append(on_changed)
+
+            on_validate = ValidateInputsHandler()
+            cmd.validateInputs.add(on_validate)
+            _handlers.append(on_validate)
         except Exception:
             if ui:
                 ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
@@ -528,27 +855,75 @@ class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
     def notify(self, args):
         try:
             changed = args.input
-            table = args.inputs.itemById('profiles')
-            if table is None:
-                return
-            if changed.id == 'profileAdd':
+            inputs = args.inputs
+            table = inputs.itemById('profiles')
+
+            if table is not None and changed.id == 'profileAdd':
                 existing = [table.getInputAtPosition(r, 1).id[3:] for r in range(table.rowCount)]
                 pid = sheet_core.next_profile_id(existing)
                 _add_profile_row(table, {'id': pid, 'name': 'Export ' + pid,
                                          'enabled': True, 'rule': 'whole_model', 'components': []})
-            elif changed.id == 'profileDelete':
+            elif table is not None and changed.id == 'profileDelete':
                 if table.selectedRow >= 0:
                     table.deleteRow(table.selectedRow)
-            elif changed.id.startswith('rl_'):
+            elif table is not None and changed.id.startswith('rl_'):
                 pid = changed.id[3:]
                 for r in range(table.rowCount):
                     cp = table.getInputAtPosition(r, 3)
                     if cp.id == 'cp_' + pid:
                         cp.isVisible = _rule_is_named(changed)
                         break
+            elif changed.id == 'loadTabs' and changed.value:
+                changed.value = False  # reset the button
+                url = inputs.itemById('sheetUrl').value.strip()
+                tab_dd = inputs.itemById('tab')
+                # Force a fresh download: the user clicked Load tabs, so any
+                # cached bytes from an earlier fetch in this session must not
+                # mask edits made to the live Google Sheet since then.
+                _xlsx_cache["url"] = None
+                _xlsx_cache["bytes"] = None
+                try:
+                    tabs = list_tabs(url)
+                except Exception as e:
+                    inputs.itemById('report').formattedText = \
+                        '<font color="#c0392b">{}</font>'.format(str(e))
+                    _build_report['ok'] = False
+                    return
+                tab_dd.listItems.clear()
+                if not tabs:
+                    tab_dd.listItems.add(CSV_ONLY_TAB_LABEL, True)
+                    inputs.itemById('report').formattedText = \
+                        'This link has no selectable tabs; it will be read as a single CSV.'
+                    _build_report['ok'] = True
+                    _refresh_test_rows(inputs)
+                    return
+                settings = sheet_core.load_settings(SETTINGS_FILE)
+                sid = sheet_core.extract_spreadsheet_id(url)
+                pinned = load_pinned_tab(settings, sid) if sid else ''
+                for i, name in enumerate(tabs):
+                    tab_dd.listItems.add(name, name == pinned or (not pinned and i == 0))
+                _run_build_validation(inputs)
+                _refresh_test_rows(inputs)
+            elif changed.id in ('tab', 'sheetUrl'):
+                _run_build_validation(inputs)
+                _refresh_test_rows(inputs)
+            elif changed.id == 'testApply' and changed.value:
+                changed.value = False
+                _apply_test_row(inputs)
+            elif changed.id == 'testRestore' and changed.value:
+                changed.value = False
+                _restore_test_snapshot()
         except Exception:
             if ui:
                 ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
+
+
+class ValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
+    def notify(self, args):
+        try:
+            args.areInputsValid = _build_report.get('ok', True)
+        except Exception:
+            args.areInputsValid = True
 
 
 class TemplateExecuteHandler(adsk.core.CommandEventHandler):
