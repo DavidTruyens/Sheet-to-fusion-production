@@ -6,7 +6,7 @@
     "description": {
         "": "Reads parametric model variants from a Google Sheet, applies the parameters, exports each variant as SAT and assembles them as components in a new design. Also generates a sheet template from the model's favorite parameters."
     },
-    "version": "1.1.0",
+    "version": "1.2.0",
     "runOnStartup": false,
     "supportedOS": "windows|mac",
     "editEnabled": true

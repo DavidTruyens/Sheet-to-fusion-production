@@ -59,8 +59,9 @@ _build_report = {"ok": True}
 # unresolved placeholder.
 CSV_ONLY_TAB_LABEL = "— single sheet (read as CSV) —"
 
-# Bumped on every change so the loaded build is identifiable in the dialog.
-ADDIN_VERSION = '1.1.0'
+# The add-in version is declared in SheetVariants.manifest ("version") and shown
+# in Fusion's Scripts and Add-Ins list. Bump it there on each change; Fusion
+# re-reads it when the add-in is removed and re-added (or on restart).
 
 # The sheet URL is remembered per design (as a document attribute), so each
 # design pre-fills its own sheet and a design with none set stays empty.
@@ -778,12 +779,6 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             cmd = args.command
             cmd.setDialogInitialSize(560, 460)
             inputs = cmd.commandInputs
-
-            # Version banner (above the tabs, so it shows on every tab) makes it
-            # obvious which build of the add-in is actually loaded.
-            ver = inputs.addTextBoxCommandInput(
-                'addinVersion', '', 'Sheet Variants — v' + ADDIN_VERSION, 1, True)
-            ver.isFullWidth = True
 
             settings = sheet_core.load_settings(SETTINGS_FILE)
             design0 = adsk.fusion.Design.cast(app.activeProduct)
