@@ -573,11 +573,34 @@ def _clear_test_snapshot():
 # Build dialog: Sheet-tab validation and Test-tab row list, refreshed
 # immediately (not on OK) as sheetUrl/tab/loadTabs change.
 # --------------------------------------------------------------------------- #
+def _find_input(inputs, input_id):
+    """Find a command input by id anywhere in the dialog, descending into tab
+    and group children.
+
+    Fusion's CommandInputs.itemById does not search across sibling tabs, and in
+    an inputChanged handler ``args.inputs`` is scoped to the changed input's own
+    tab. A handler firing in one tab must therefore walk the tree explicitly to
+    reach an input that lives in another tab (e.g. the Test-tab row list updated
+    when the Sheet tab's Load-tabs button is clicked)."""
+    direct = inputs.itemById(input_id)
+    if direct:
+        return direct
+    tab_t = adsk.core.TabCommandInput.classType()
+    grp_t = adsk.core.GroupCommandInput.classType()
+    for i in range(inputs.count):
+        child = inputs.item(i)
+        if child.objectType in (tab_t, grp_t):
+            found = _find_input(child.children, input_id)
+            if found:
+                return found
+    return None
+
+
 def _selected_tab_name(inputs):
     """The chosen 'tab' item's name, or None for any placeholder/sentinel
     (anything starting with the em-dash used by all of "— click Load tabs —",
     CSV_ONLY_TAB_LABEL, and "— could not read tab —")."""
-    tab_item = inputs.itemById('tab').selectedItem
+    tab_item = _find_input(inputs, 'tab').selectedItem
     if not tab_item or tab_item.name.startswith('—'):
         return None
     return tab_item.name
@@ -589,14 +612,14 @@ def _selected_tab_is_csv_only(inputs):
     placeholder (e.g. "— click Load tabs —"). Callers that need to tell
     "CSV-only" apart from "nothing chosen yet" use this alongside
     _selected_tab_name, which collapses both cases to None."""
-    tab_item = inputs.itemById('tab').selectedItem
+    tab_item = _find_input(inputs, 'tab').selectedItem
     return bool(tab_item and tab_item.name == CSV_ONLY_TAB_LABEL)
 
 
 def _run_build_validation(inputs):
     """Refresh the report textbox + _build_report flag from current inputs."""
-    url = inputs.itemById('sheetUrl').value.strip()
-    report_box = inputs.itemById('report')
+    url = _find_input(inputs, 'sheetUrl').value.strip()
+    report_box = _find_input(inputs, 'report')
     design = adsk.fusion.Design.cast(app.activeProduct)
     if not design:
         report_box.formattedText = 'Open your parametric source model to validate.'
@@ -621,8 +644,8 @@ def _run_build_validation(inputs):
 
 def _refresh_test_rows(inputs):
     """Repopulate the Test tab's row dropdown from the currently chosen tab."""
-    url = inputs.itemById('sheetUrl').value.strip()
-    row_dd = inputs.itemById('testRow')
+    url = _find_input(inputs, 'sheetUrl').value.strip()
+    row_dd = _find_input(inputs, 'testRow')
     row_dd.listItems.clear()
     tab_name = _selected_tab_name(inputs)
     if tab_name is None and not _selected_tab_is_csv_only(inputs):
@@ -645,12 +668,12 @@ def _apply_test_row(inputs):
     if not design:
         ui.messageBox('Open your parametric source model first.')
         return
-    row_item = inputs.itemById('testRow').selectedItem
+    row_item = _find_input(inputs, 'testRow').selectedItem
     if not row_item or row_item.name.startswith('—'):
         ui.messageBox('Pick a variant row to test.')
         return
 
-    url = inputs.itemById('sheetUrl').value.strip()
+    url = _find_input(inputs, 'sheetUrl').value.strip()
     tab_name = _selected_tab_name(inputs)
     try:
         rows = get_rows(url, tab_name)
@@ -724,8 +747,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         try:
             inputs = args.command.commandInputs
-            url = inputs.itemById('sheetUrl').value.strip()
-            spacing_cm = inputs.itemById('spacing').value      # ValueInput returns internal cm
+            url = _find_input(inputs, 'sheetUrl').value.strip()
+            spacing_cm = _find_input(inputs, 'spacing').value      # ValueInput returns internal cm
             if not url:
                 ui.messageBox('Please paste the Google Sheet URL.')
                 return
@@ -733,7 +756,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             tab = _selected_tab_name(inputs)
 
             settings = sheet_core.load_settings(SETTINGS_FILE)
-            profiles = _read_profiles(inputs.itemById('profiles'))
+            profiles = _read_profiles(_find_input(inputs, 'profiles'))
             settings['sheet_url'] = url
             settings['spacing_mm'] = spacing_cm * 10.0
             settings['profiles'] = profiles
@@ -855,8 +878,10 @@ class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
     def notify(self, args):
         try:
             changed = args.input
-            inputs = args.inputs
-            table = inputs.itemById('profiles')
+            # args.inputs is scoped to the changed input's own tab, so use the
+            # command's top-level inputs and _find_input to reach other tabs.
+            inputs = changed.parentCommand.commandInputs
+            table = _find_input(inputs, 'profiles')
 
             if table is not None and changed.id == 'profileAdd':
                 existing = [table.getInputAtPosition(r, 1).id[3:] for r in range(table.rowCount)]
@@ -875,8 +900,8 @@ class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
                         break
             elif changed.id == 'loadTabs' and changed.value:
                 changed.value = False  # reset the button
-                url = inputs.itemById('sheetUrl').value.strip()
-                tab_dd = inputs.itemById('tab')
+                url = _find_input(inputs, 'sheetUrl').value.strip()
+                tab_dd = _find_input(inputs, 'tab')
                 # Force a fresh download: the user clicked Load tabs, so any
                 # cached bytes from an earlier fetch in this session must not
                 # mask edits made to the live Google Sheet since then.
@@ -885,14 +910,14 @@ class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
                 try:
                     tabs = list_tabs(url)
                 except Exception as e:
-                    inputs.itemById('report').formattedText = \
+                    _find_input(inputs, 'report').formattedText = \
                         '<font color="#c0392b">{}</font>'.format(str(e))
                     _build_report['ok'] = False
                     return
                 tab_dd.listItems.clear()
                 if not tabs:
                     tab_dd.listItems.add(CSV_ONLY_TAB_LABEL, True)
-                    inputs.itemById('report').formattedText = \
+                    _find_input(inputs, 'report').formattedText = \
                         'This link has no selectable tabs; it will be read as a single CSV.'
                     _build_report['ok'] = True
                     _refresh_test_rows(inputs)
