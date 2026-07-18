@@ -31,8 +31,8 @@ parameters, so the column names always match.
   parameter (or flags it), warns about parameters with no column, and flags bad
   cells (comma decimals, empty values). The **OK/Build** button is disabled
   until the errors are fixed.
-- **Test a variant on the live model** — apply one sheet row to the open model
-  to eyeball it, then restore just the parameters it touched.
+- **Test Variant Row** — a separate command that previews one sheet row live on
+  the open model so you can eyeball it; the model reverts when you close it.
 - No Google Cloud project or API key: multi-tab sheets are fetched once as an
   XLSX workbook and parsed with the standard library (`zipfile`); single-tab
   and published-to-web links are still read as CSV.
@@ -97,13 +97,13 @@ A ready-to-use sample is in [`examples/variants_example.csv`](examples/variants_
 3. In Google Sheets: **File → Import → Upload** the CSV; add one row per variant.
    Share the sheet ("Anyone with the link") or publish it to the web as CSV.
 4. Open your source model and run **Build Variants Assembly from Sheet** — a
-   3-tab dialog:
+   2-tab dialog:
    - **Sheet tab** — paste the sheet link, **Load tabs**, pick the tab with
      your variants, and clear anything the **Check** report flags.
-   - **Test tab** *(optional)* — pick a variant row to preview it live on the
-     model; it reverts when you close the dialog.
    - **Output sets tab** — check your export profiles (see below).
    Click **OK** to build.
+   To eyeball a single variant first, use the separate **Test Variant Row**
+   command (see below).
 
 For each *enabled* profile, a new untitled design opens named after that profile,
 with one named component per variant, laid out left-to-right with the gap you
@@ -131,14 +131,18 @@ model before you build:
 While the report has errors, the dialog's **OK/Build** button is disabled; fix
 the sheet (or pick a different tab) until it's clean.
 
-## Test tab
+## Test Variant Row (live preview)
 
-Once a tab is picked, the **Test tab**'s **Variant row** dropdown lists every
-row in it. Selecting a row **previews it live** on the open model — its values
-are applied so you can inspect the result while the dialog is open, and the
-model automatically **reverts to its original values when you close the dialog**
-(so the preview never leaves the model in a modified state). Click **OK** to
-build; **Cancel** to just discard the preview.
+**Test Variant Row** is a separate command (its own button on the Sheet Variants
+panel). Paste the sheet link, **Load tabs**, pick a tab, then choose a row from
+the **Variant row** dropdown: that row's values are applied to the open model as
+a **live preview** so you can inspect it. The model automatically **reverts to
+its original values when you close the dialog**, so the preview never leaves the
+model modified.
+
+It's a separate command on purpose: previewing edits the model's parameters, and
+Fusion doesn't allow that to happen inside the same command that also builds — so
+Test lives on its own, keeping Build reliable.
 
 ## Remembering the sheet per design
 
@@ -177,7 +181,7 @@ Fusion's bundled Python can't easily install the Google client libraries, so the
 add-in reads the sheet using only the standard library — still no Google API key
 or extra packages. A sheet with tabs to pick from is fetched **once** as an XLSX
 workbook (`export?format=xlsx`) and parsed with `zipfile`; switching tabs or
-trying a row in the Test tab reuses that same download. A single-tab link (no
+previewing a row in Test Variant Row reuses that same download. A single-tab link (no
 tabs to list) or a published-to-web link still uses the original CSV path: it's
 converted to (or already is) an `export?format=csv` link and parsed with `csv`.
 Nothing is written back to the sheet either way.
