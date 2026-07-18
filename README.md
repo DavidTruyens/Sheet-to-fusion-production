@@ -100,8 +100,8 @@ A ready-to-use sample is in [`examples/variants_example.csv`](examples/variants_
    3-tab dialog:
    - **Sheet tab** — paste the sheet link, **Load tabs**, pick the tab with
      your variants, and clear anything the **Check** report flags.
-   - **Test tab** *(optional)* — apply one variant row to the model to eyeball
-     it, then restore it.
+   - **Test tab** *(optional)* — pick a variant row to preview it live on the
+     model; it reverts when you close the dialog.
    - **Output sets tab** — check your export profiles (see below).
    Click **OK** to build.
 
@@ -134,10 +134,18 @@ the sheet (or pick a different tab) until it's clean.
 ## Test tab
 
 Once a tab is picked, the **Test tab**'s **Variant row** dropdown lists every
-row in it. **Apply to model** writes that row's values into the open model's
-parameters right away, so you can inspect the result; **Restore original
-values** puts them back. Only the parameters that row actually touches are
-changed or restored.
+row in it. Selecting a row **previews it live** on the open model — its values
+are applied so you can inspect the result while the dialog is open, and the
+model automatically **reverts to its original values when you close the dialog**
+(so the preview never leaves the model in a modified state). Click **OK** to
+build; **Cancel** to just discard the preview.
+
+## Remembering the sheet per design
+
+The Google Sheet URL is stored **on the design itself**, so each design
+pre-fills its own sheet link the next time you open the dialog with that design
+active. A design that has never been linked starts with an empty URL field. The
+link is remembered as soon as **Load tabs** reads the sheet (and again on build).
 
 ## Export profiles
 
