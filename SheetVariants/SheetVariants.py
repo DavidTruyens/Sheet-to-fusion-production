@@ -415,14 +415,18 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 name = raw_name or 'Variant_{}'.format(i + 1)
                 safe_name = re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip() or 'Variant_{}'.format(i + 1)
 
-                design = adsk.fusion.Design.cast(app.activeProduct)  # fresh, source is active
-                params = design.allParameters
                 for col, pname in enumerate(param_names, start=1):
                     if col < len(row):
                         val = row[col].strip()
                         if val:
                             _dbg('  row {} set {}={!r}'.format(i, pname, val))
-                            apply_expression(params.itemByName(pname), val)
+                            # Re-derive design + parameter FRESH for every apply:
+                            # setting a driving dimension recomputes the model,
+                            # which can invalidate the parameter collection, so the
+                            # one from the previous apply may already be dead.
+                            p = adsk.fusion.Design.cast(app.activeProduct).allParameters.itemByName(pname)
+                            if p:
+                                apply_expression(p, val)
                 adsk.doEvents()  # recompute the source with this variant's values
 
                 design = adsk.fusion.Design.cast(app.activeProduct)  # fresh after recompute
@@ -440,15 +444,15 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 _dbg('  row {} snapshotted'.format(i))
                 progress.progressValue = i + 1
         finally:
-            # Restore the source model (re-derive fresh — a held reference may be stale).
-            design = adsk.fusion.Design.cast(app.activeProduct)
-            if design:
-                rparams = design.allParameters
-                for p, expr in original.items():
-                    try:
-                        rparams.itemByName(p).expression = expr
-                    except Exception:
-                        pass
+            # Restore the source model — re-derive fresh per parameter, since each
+            # set can recompute and invalidate the parameter collection.
+            for p, expr in original.items():
+                try:
+                    rp = adsk.fusion.Design.cast(app.activeProduct).allParameters.itemByName(p)
+                    if rp:
+                        rp.expression = expr
+                except Exception:
+                    pass
             adsk.doEvents()
 
         # Phase 2: one output design per profile, laid out left-to-right. Only now
