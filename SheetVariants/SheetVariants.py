@@ -307,8 +307,10 @@ RESOLVERS = {
 
 
 def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
-    """Build one new design per enabled profile. Recomputes each variant once
-    and feeds every profile. Returns per-profile result dicts for reporting."""
+    """Build one new design per enabled profile. Each profile is built into its
+    own document (created before parameters are edited, so the source model is in
+    the background while its parameters change). Returns per-profile result dicts
+    for reporting."""
     rows = get_rows(sheet_url, tab_name)
     header = [h.strip() for h in rows[0]]
     if not header or not header[0]:
@@ -335,8 +337,8 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
     present = component_names(src_design)
     contexts = []
     for prof in enabled:
-        ctx = {'profile': prof, 'name': prof.get('name') or 'Export', 'design': None,
-               'root': None, 'x_cursor': 0.0, 'built': 0, 'warnings': [], 'skipped': False}
+        ctx = {'profile': prof, 'name': prof.get('name') or 'Export',
+               'built': 0, 'warnings': [], 'skipped': False}
         if prof.get('rule') not in RESOLVERS:
             ctx['skipped'] = True
             ctx['warnings'] = ["unknown rule '{}'".format(prof.get('rule'))]
@@ -355,62 +357,19 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
 
     progress = ui.createProgressDialog()
     progress.isCancelButtonShown = True
-    progress.show('Building exports', 'Variant %v of %m', 0, len(rows) - 1, 0)
+    progress.show('Building exports', 'Variant %v of %m', 0, (len(rows) - 1) * len(active), 0)
 
+    # Build each profile into its OWN new document, created BEFORE any parameter
+    # is edited — the proven pattern from the original single-output builder. The
+    # source model must NOT be the active document while its parameters change in
+    # a loop: editing the *active* design's parameters and recomputing invalidates
+    # its allParameters ("API Object refers to a deleted Object"). Creating the
+    # output document first makes it active and leaves the source in the
+    # background, where editing its parameters is safe.
+    done = 0
     try:
-        # --- Phase 1: apply each variant to the SOURCE model and snapshot its
-        # solids as standalone temporary BReps. No output document is created
-        # here, so the source design stays active and all_params never goes
-        # stale. (Creating an output document mid-loop was what invalidated
-        # all_params on the next row — the "deleted Object" crash.)
-        try:
-            for i, row in enumerate(rows[1:]):
-                if progress.wasCancelled:
-                    raise RuntimeError('Cancelled by user.')
-
-                raw_name = row[0].strip() if len(row) > 0 else ''
-                name = raw_name or 'Variant_{}'.format(i + 1)
-                safe_name = re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip() or 'Variant_{}'.format(i + 1)
-
-                for col, pname in enumerate(param_names, start=1):
-                    if col < len(row):
-                        val = row[col].strip()
-                        if val:
-                            apply_expression(all_params.itemByName(pname), val)
-                adsk.doEvents()  # single recompute shared by all profiles
-
-                for ctx in active:
-                    resolver = RESOLVERS[ctx['profile']['rule']]
-                    src_bodies, _warn = resolver(src_design, ctx['profile'])
-                    temp_bodies = []
-                    for body in src_bodies:
-                        try:
-                            temp_bodies.append(tbm.copy(body))
-                        except Exception:
-                            pass
-                    if temp_bodies:
-                        ctx.setdefault('variants', []).append((safe_name, temp_bodies))
-
-                progress.progressValue = i + 1
-        finally:
-            # Always put the source model back the way we found it.
-            for p, expr in original.items():
-                try:
-                    all_params.itemByName(p).expression = expr
-                except Exception:
-                    pass
-            adsk.doEvents()
-
-        # --- Phase 2: create one output design per profile and lay out its
-        # snapshots left-to-right. Temporary BReps are document-independent, so
-        # they survive the source restore above and the new-document creation.
         for ctx in active:
-            variants = ctx.get('variants', [])
-            if not variants:
-                ctx['skipped'] = True
-                if not ctx['warnings']:
-                    ctx['warnings'] = ['no solid bodies matched']
-                continue
+            resolver = RESOLVERS[ctx['profile']['rule']]
 
             new_doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
             nd = adsk.fusion.Design.cast(new_doc.products.itemByProductType('DesignProductType'))
@@ -419,24 +378,62 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 root.name = ctx['name']
             except Exception:
                 pass
+            all_params = src_design.allParameters  # re-fetch now the source is in the background
 
             x_cursor = 0.0
-            for safe_name, temp_bodies in variants:
-                min_x = min(tb.boundingBox.minPoint.x for tb in temp_bodies)
-                max_x = max(tb.boundingBox.maxPoint.x for tb in temp_bodies)
-                transform = adsk.core.Matrix3D.create()
-                transform.translation = adsk.core.Vector3D.create(x_cursor - min_x, 0.0, 0.0)
-                occ = root.occurrences.addNewComponent(transform)
-                occ.component.name = safe_name
-                base = occ.component.features.baseFeatures.add()
-                base.startEdit()
-                try:
-                    for tb in temp_bodies:
-                        occ.component.bRepBodies.add(tb, base)
-                finally:
-                    base.finishEdit()
-                x_cursor += (max_x - min_x) + spacing_cm
-                ctx['built'] += 1
+            try:
+                for i, row in enumerate(rows[1:]):
+                    if progress.wasCancelled:
+                        raise RuntimeError('Cancelled by user.')
+
+                    raw_name = row[0].strip() if len(row) > 0 else ''
+                    name = raw_name or 'Variant_{}'.format(i + 1)
+                    safe_name = re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip() or 'Variant_{}'.format(i + 1)
+
+                    for col, pname in enumerate(param_names, start=1):
+                        if col < len(row):
+                            val = row[col].strip()
+                            if val:
+                                apply_expression(all_params.itemByName(pname), val)
+                    adsk.doEvents()  # recompute the source with this variant's values
+
+                    src_bodies, _warn = resolver(src_design, ctx['profile'])
+                    temp_bodies = []
+                    for body in src_bodies:
+                        try:
+                            temp_bodies.append(tbm.copy(body))
+                        except Exception:
+                            pass
+                    if temp_bodies:
+                        min_x = min(tb.boundingBox.minPoint.x for tb in temp_bodies)
+                        max_x = max(tb.boundingBox.maxPoint.x for tb in temp_bodies)
+                        transform = adsk.core.Matrix3D.create()
+                        transform.translation = adsk.core.Vector3D.create(x_cursor - min_x, 0.0, 0.0)
+                        occ = root.occurrences.addNewComponent(transform)
+                        occ.component.name = safe_name
+                        base = occ.component.features.baseFeatures.add()
+                        base.startEdit()
+                        try:
+                            for tb in temp_bodies:
+                                occ.component.bRepBodies.add(tb, base)
+                        finally:
+                            base.finishEdit()
+                        x_cursor += (max_x - min_x) + spacing_cm
+                        ctx['built'] += 1
+
+                    done += 1
+                    progress.progressValue = done
+            finally:
+                # Restore the source model before moving to the next profile.
+                for p, expr in original.items():
+                    try:
+                        all_params.itemByName(p).expression = expr
+                    except Exception:
+                        pass
+                adsk.doEvents()
+
+            if ctx['built'] == 0 and not ctx['warnings']:
+                ctx['warnings'] = ['no solid bodies matched']
     finally:
         progress.hide()
 
