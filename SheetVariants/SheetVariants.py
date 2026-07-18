@@ -203,31 +203,41 @@ def set_pinned_tab(settings, spreadsheet_id, tab):
 
 
 def load_design_url(design):
-    """The Google Sheet URL remembered on this design, or '' if none is set."""
-    if not design:
-        _dbg('load_design_url: no active design')
-        return ''
-    try:
-        attr = design.attributes.itemByName(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL)
-        val = attr.value if attr else ''
-        _dbg('load_design_url: read {!r}'.format(val))
-        return val
-    except Exception:
-        _dbg('load_design_url FAILED:\n' + traceback.format_exc())
-        return ''
+    """The Google Sheet URL for this design: its own stored attribute if set,
+    else the last-used URL (app-level fallback), else ''."""
+    if design:
+        try:
+            attr = design.attributes.itemByName(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL)
+            if attr and attr.value:
+                _dbg('load_design_url: from design {!r}'.format(attr.value))
+                return attr.value
+        except Exception:
+            _dbg('load_design_url FAILED:\n' + traceback.format_exc())
+    # Fallback: the last sheet used. Keeps the URL pre-filled even when the active
+    # document is a fresh output design, or after a restart where the source
+    # document's attribute wasn't saved to disk.
+    val = sheet_core.load_settings(SETTINGS_FILE).get('sheet_url', '') or ''
+    _dbg('load_design_url: fallback {!r}'.format(val))
+    return val
 
 
 def save_design_url(design, url):
-    """Remember the sheet URL on this specific design so it pre-fills next time
-    this design is active. Attributes travel with the saved document."""
+    """Remember the sheet URL on this design (as a document attribute) and as the
+    app-level last-used URL, so it pre-fills next time regardless of which
+    document is active."""
+    try:
+        s = sheet_core.load_settings(SETTINGS_FILE)
+        s['sheet_url'] = url or ''
+        sheet_core.save_settings(SETTINGS_FILE, s)
+    except Exception:
+        pass
     if not design:
-        _dbg('save_design_url: no active design')
+        _dbg('save_design_url: no active design (settings only)')
         return
     try:
         design.attributes.add(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL, url or '')
-        # Read back to confirm the write actually persisted.
         chk = design.attributes.itemByName(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL)
-        _dbg('save_design_url: wrote {!r}, read-back {!r}'.format(
+        _dbg('save_design_url: design write {!r}, read-back {!r}'.format(
             url, chk.value if chk else None))
     except Exception:
         _dbg('save_design_url FAILED:\n' + traceback.format_exc())
@@ -382,50 +392,43 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
 
     progress = ui.createProgressDialog()
     progress.isCancelButtonShown = True
-    progress.show('Building exports', 'Variant %v of %m', 0, (len(rows) - 1) * len(active), 0)
+    progress.show('Building exports', 'Variant %v of %m', 0, len(rows) - 1, 0)
 
-    # Build each profile into its OWN new document, created BEFORE any parameter
-    # is edited — the proven pattern from the original single-output builder. The
-    # source model must NOT be the active document while its parameters change in
-    # a loop: editing the *active* design's parameters and recomputing invalidates
-    # its allParameters ("API Object refers to a deleted Object"). Creating the
-    # output document first makes it active and leaves the source in the
-    # background, where editing its parameters is safe.
+    # documents.add() invalidates every reference to the source design (and its
+    # allParameters) in this Fusion build — confirmed via the debug log: the
+    # first itemByName right after creating an output document raised "deleted
+    # Object". So NO output document may be created while we still need to read
+    # the source. Phase 1 applies each variant to the source and snapshots its
+    # solids as temporary BReps, with the source as the ONLY open design and the
+    # design/params re-derived fresh from app.activeProduct each row (a recompute
+    # can also invalidate a held collection). Phase 2 then creates the output
+    # documents and fills them from the snapshots.
     _dbg('=== build_exports: {} rows, {} profile(s), tab={!r} ==='.format(
         len(rows) - 1, len(active), tab_name))
-    done = 0
     try:
-        for ctx in active:
-            resolver = RESOLVERS[ctx['profile']['rule']]
+        try:
+            for i, row in enumerate(rows[1:]):
+                if progress.wasCancelled:
+                    raise RuntimeError('Cancelled by user.')
 
-            new_doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
-            nd = adsk.fusion.Design.cast(new_doc.products.itemByProductType('DesignProductType'))
-            root = nd.rootComponent
-            try:
-                root.name = ctx['name']
-            except Exception:
-                pass
-            _dbg("profile '{}' rule={}: doc created".format(ctx['name'], ctx['profile'].get('rule')))
+                raw_name = row[0].strip() if len(row) > 0 else ''
+                name = raw_name or 'Variant_{}'.format(i + 1)
+                safe_name = re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip() or 'Variant_{}'.format(i + 1)
 
-            x_cursor = 0.0
-            try:
-                for i, row in enumerate(rows[1:]):
-                    _dbg('  row {}: applying {} params'.format(i, len(param_names)))
-                    if progress.wasCancelled:
-                        raise RuntimeError('Cancelled by user.')
+                design = adsk.fusion.Design.cast(app.activeProduct)  # fresh, source is active
+                params = design.allParameters
+                for col, pname in enumerate(param_names, start=1):
+                    if col < len(row):
+                        val = row[col].strip()
+                        if val:
+                            _dbg('  row {} set {}={!r}'.format(i, pname, val))
+                            apply_expression(params.itemByName(pname), val)
+                adsk.doEvents()  # recompute the source with this variant's values
 
-                    raw_name = row[0].strip() if len(row) > 0 else ''
-                    name = raw_name or 'Variant_{}'.format(i + 1)
-                    safe_name = re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip() or 'Variant_{}'.format(i + 1)
-
-                    for col, pname in enumerate(param_names, start=1):
-                        if col < len(row):
-                            val = row[col].strip()
-                            if val:
-                                apply_expression(all_params.itemByName(pname), val)
-                    adsk.doEvents()  # recompute the source with this variant's values
-
-                    src_bodies, _warn = resolver(src_design, ctx['profile'])
+                design = adsk.fusion.Design.cast(app.activeProduct)  # fresh after recompute
+                for ctx in active:
+                    resolver = RESOLVERS[ctx['profile']['rule']]
+                    src_bodies, _warn = resolver(design, ctx['profile'])
                     temp_bodies = []
                     for body in src_bodies:
                         try:
@@ -433,35 +436,56 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                         except Exception:
                             pass
                     if temp_bodies:
-                        min_x = min(tb.boundingBox.minPoint.x for tb in temp_bodies)
-                        max_x = max(tb.boundingBox.maxPoint.x for tb in temp_bodies)
-                        transform = adsk.core.Matrix3D.create()
-                        transform.translation = adsk.core.Vector3D.create(x_cursor - min_x, 0.0, 0.0)
-                        occ = root.occurrences.addNewComponent(transform)
-                        occ.component.name = safe_name
-                        base = occ.component.features.baseFeatures.add()
-                        base.startEdit()
-                        try:
-                            for tb in temp_bodies:
-                                occ.component.bRepBodies.add(tb, base)
-                        finally:
-                            base.finishEdit()
-                        x_cursor += (max_x - min_x) + spacing_cm
-                        ctx['built'] += 1
-
-                    done += 1
-                    progress.progressValue = done
-            finally:
-                # Restore the source model before moving to the next profile.
+                        ctx.setdefault('variants', []).append((safe_name, temp_bodies))
+                _dbg('  row {} snapshotted'.format(i))
+                progress.progressValue = i + 1
+        finally:
+            # Restore the source model (re-derive fresh — a held reference may be stale).
+            design = adsk.fusion.Design.cast(app.activeProduct)
+            if design:
+                rparams = design.allParameters
                 for p, expr in original.items():
                     try:
-                        all_params.itemByName(p).expression = expr
+                        rparams.itemByName(p).expression = expr
                     except Exception:
                         pass
-                adsk.doEvents()
+            adsk.doEvents()
 
-            if ctx['built'] == 0 and not ctx['warnings']:
-                ctx['warnings'] = ['no solid bodies matched']
+        # Phase 2: one output design per profile, laid out left-to-right. Only now
+        # do we create documents — the source has been fully read and restored.
+        for ctx in active:
+            variants = ctx.get('variants', [])
+            if not variants:
+                ctx['skipped'] = True
+                if not ctx['warnings']:
+                    ctx['warnings'] = ['no solid bodies matched']
+                continue
+            _dbg("profile '{}': creating output doc, {} variant(s)".format(ctx['name'], len(variants)))
+            new_doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+            nd = adsk.fusion.Design.cast(new_doc.products.itemByProductType('DesignProductType'))
+            root = nd.rootComponent
+            try:
+                root.name = ctx['name']
+            except Exception:
+                pass
+
+            x_cursor = 0.0
+            for safe_name, temp_bodies in variants:
+                min_x = min(tb.boundingBox.minPoint.x for tb in temp_bodies)
+                max_x = max(tb.boundingBox.maxPoint.x for tb in temp_bodies)
+                transform = adsk.core.Matrix3D.create()
+                transform.translation = adsk.core.Vector3D.create(x_cursor - min_x, 0.0, 0.0)
+                occ = root.occurrences.addNewComponent(transform)
+                occ.component.name = safe_name
+                base = occ.component.features.baseFeatures.add()
+                base.startEdit()
+                try:
+                    for tb in temp_bodies:
+                        occ.component.bRepBodies.add(tb, base)
+                finally:
+                    base.finishEdit()
+                x_cursor += (max_x - min_x) + spacing_cm
+                ctx['built'] += 1
     except Exception:
         _dbg('BUILD FAILED:\n' + traceback.format_exc())
         raise
