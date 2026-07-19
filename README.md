@@ -202,6 +202,15 @@ Nothing is written back to the sheet either way.
 - Components are placed (offset along X) but not jointed; add constraints as needed.
 - The network fetch briefly blocks the Fusion UI while the sheet downloads.
 
+## Roadmap
+
+Planned / ideas (also tracked in [`CHANGELOG.md`](CHANGELOG.md)):
+
+- **Sheet metal flat patterns** — build or export the flat pattern of sheet-metal
+  components (e.g. as a dedicated output set) alongside the solid variants.
+- **Filter by thickness** — filter which variants or components are built/exported
+  by their material thickness.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
