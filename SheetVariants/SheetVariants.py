@@ -514,17 +514,22 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 occ = root.occurrences.addNewComponent(transform)
                 occ.component.name = safe_name
                 base = occ.component.features.baseFeatures.add()
-                added = []
                 base.startEdit()
                 try:
-                    for tmp, appr, mat in temp_bodies:
-                        added.append((occ.component.bRepBodies.add(tmp, base), appr, mat))
+                    for tmp, _appr, _mat in temp_bodies:
+                        occ.component.bRepBodies.add(tmp, base)
                 finally:
                     base.finishEdit()
                 # Re-apply the source look (temporary BReps lose material/appearance).
-                # Best-effort: the geometry is already built, so any failure here
-                # just leaves the default look rather than breaking the build.
-                for nb, appr, mat in added:
+                # The body objects returned during the base-feature edit go stale
+                # after finishEdit(), so fetch the component's bodies fresh and match
+                # them by index. Best-effort: the geometry is already built, so any
+                # failure just leaves the default look rather than breaking the build.
+                comp_bodies = occ.component.bRepBodies
+                for idx, (_tmp, appr, mat) in enumerate(temp_bodies):
+                    if idx >= comp_bodies.count:
+                        break
+                    nb = comp_bodies.item(idx)
                     try:
                         if mat:
                             m = _material_in(nd, mat)
