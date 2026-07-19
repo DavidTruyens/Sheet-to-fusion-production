@@ -11,7 +11,7 @@ its own new design, one component per variant.
 It can also generate the sheet **template** straight from the model's favorite
 parameters, so the column names always match.
 
-![Variants laid out in a new design, spaced by size](docs/variant-assembly.png)
+![Two window variants built from one Google Sheet, each a separate component and carrying the source model's materials and appearances](docs/variants-built.png)
 
 ## Features
 
@@ -33,6 +33,8 @@ parameters, so the column names always match.
   until the errors are fixed.
 - **Test tab** — pick one sheet row to preview it live on the open model so you
   can eyeball it; the model reverts when you close the dialog.
+- **Materials & appearances** — built variants keep the source model's materials
+  and body appearances, so each export looks like the original instead of flat grey.
 - No Google Cloud project or API key: multi-tab sheets are fetched once as an
   XLSX workbook and parsed with the standard library (`zipfile`); single-tab
   and published-to-web links are still read as CSV.
@@ -131,6 +133,8 @@ model before you build:
 While the report has errors, the dialog's **OK/Build** button is disabled; fix
 the sheet (or pick a different tab) until it's clean.
 
+![The Sheet tab: paste the link, Load tabs, pick the data tab; the Check report confirms 17 columns mapped and 2 rows OK](docs/dialog-sheet.png)
+
 ## Test tab (live preview)
 
 After loading a tab, switch to the **Test tab** and choose a row from the
@@ -138,6 +142,8 @@ After loading a tab, switch to the **Test tab** and choose a row from the
 **live preview** so you can inspect it. The model automatically **reverts to its
 original values when you close the dialog** (Cancel), so the preview never leaves
 the model modified — or click **OK** to build the output sets.
+
+![The Test tab: choose a variant row to preview it live on the model](docs/dialog-test.png)
 
 ## Remembering the sheet per design
 
@@ -162,6 +168,14 @@ row per output design. Each row has:
 Use **Add**/**Remove** to add or delete profile rows. Profiles are saved to
 `settings.json` alongside the sheet link and spacing, so they're remembered next
 time you open the dialog.
+
+![The Output sets tab: one row per export profile — a whole-model 'Full model' plus a 'Named components' export whose Components picker selects a subset](docs/dialog-output-sets.png)
+
+A **Named components** profile exports only the chosen parts for each variant —
+here, just the curtain board — so you can produce a focused assembly (e.g. for
+cutting or nesting) alongside the full-model output:
+
+![A Named-components profile builds only the selected part for each variant](docs/output-named-components.png)
 
 If a Named-components profile references a component that no longer exists in
 the model (renamed or deleted), that component is **warned about, not fatal**:
