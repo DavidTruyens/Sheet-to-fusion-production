@@ -55,20 +55,27 @@ parameters, so the column names always match.
 
 ## Install
 
-Clone or download this repo, then point Fusion at the add-in folder:
+### Download the latest release (recommended)
+
+1. Download **`SheetVariants-<version>.zip`** from the
+   [latest release](https://github.com/DavidTruyens/Sheet-to-fusion-production/releases/latest)
+   and unzip it — it contains just the `SheetVariants` add-in folder.
+2. In Fusion: **Utilities → Scripts and Add-Ins → Add-Ins tab → green +**, browse to
+   the unzipped `SheetVariants` folder, select it and click **Run**. A **Sheet
+   Variants** panel appears on the **MANAGE** tab.
+
+To have Fusion auto-list it, drop the `SheetVariants` folder into the add-ins
+directory instead: `%appdata%\Autodesk\Autodesk Fusion 360\API\AddIns` on Windows,
+or `~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns` on macOS.
+
+### From source
+
+Prefer the code? Clone the repo and point Fusion at the `SheetVariants` folder the
+same way:
 
 ```bash
 git clone https://github.com/DavidTruyens/Sheet-to-fusion-production.git
 ```
-
-In Fusion: **Utilities → Scripts and Add-Ins → Add-Ins tab → green +**, browse to the
-`SheetVariants` folder inside this repo, then select it and click **Run**. A new
-**Sheet Variants** panel with two buttons appears on the **MANAGE** tab.
-
-(To have Fusion auto-list it, the `SheetVariants` folder can also be copied into the
-Fusion add-ins directory: `%appdata%\Autodesk\Autodesk Fusion 360\API\AddIns` on
-Windows, or `~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns`
-on macOS.)
 
 ![The Sheet Variants panel on the MANAGE tab, with the source model and its parameters](docs/sheet-variants-panel.png)
 
