@@ -106,19 +106,6 @@ FALLBACK_PANEL_ID = 'SolidScriptsAddinsPanel'
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'settings.json')
 
-# Debug log — writes to the user's home folder so a failing build can be
-# diagnosed without attaching a debugger. Share the tail of this file if a build
-# still fails: ~/sheetvariants_debug.log
-_DEBUG_LOG = os.path.join(os.path.expanduser('~'), 'sheetvariants_debug.log')
-
-
-def _dbg(msg):
-    try:
-        with open(_DEBUG_LOG, 'a') as f:
-            f.write(str(msg) + '\n')
-    except Exception:
-        pass
-
 
 # --------------------------------------------------------------------------- #
 # Google Sheet reading. Works with no extra Python packages by pulling the
@@ -209,16 +196,13 @@ def load_design_url(design):
         try:
             attr = design.attributes.itemByName(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL)
             if attr and attr.value:
-                _dbg('load_design_url: from design {!r}'.format(attr.value))
                 return attr.value
         except Exception:
-            _dbg('load_design_url FAILED:\n' + traceback.format_exc())
+            pass
     # Fallback: the last sheet used. Keeps the URL pre-filled even when the active
     # document is a fresh output design, or after a restart where the source
     # document's attribute wasn't saved to disk.
-    val = sheet_core.load_settings(SETTINGS_FILE).get('sheet_url', '') or ''
-    _dbg('load_design_url: fallback {!r}'.format(val))
-    return val
+    return sheet_core.load_settings(SETTINGS_FILE).get('sheet_url', '') or ''
 
 
 def save_design_url(design, url):
@@ -232,15 +216,11 @@ def save_design_url(design, url):
     except Exception:
         pass
     if not design:
-        _dbg('save_design_url: no active design (settings only)')
         return
     try:
         design.attributes.add(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL, url or '')
-        chk = design.attributes.itemByName(DESIGN_ATTR_GROUP, DESIGN_ATTR_URL)
-        _dbg('save_design_url: design write {!r}, read-back {!r}'.format(
-            url, chk.value if chk else None))
     except Exception:
-        _dbg('save_design_url FAILED:\n' + traceback.format_exc())
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -424,8 +404,6 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
     # design/params re-derived fresh from app.activeProduct each row (a recompute
     # can also invalidate a held collection). Phase 2 then creates the output
     # documents and fills them from the snapshots.
-    _dbg('=== build_exports: {} rows, {} profile(s), tab={!r} ==='.format(
-        len(rows) - 1, len(active), tab_name))
     try:
         try:
             for i, row in enumerate(rows[1:]):
@@ -440,7 +418,6 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                     if col < len(row):
                         val = row[col].strip()
                         if val:
-                            _dbg('  row {} set {}={!r}'.format(i, pname, val))
                             # Re-derive design + parameter FRESH for every apply:
                             # setting a driving dimension recomputes the model,
                             # which can invalidate the parameter collection, so the
@@ -472,7 +449,6 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                         temp_bodies.append((tmp, appr, mat))
                     if temp_bodies:
                         ctx.setdefault('variants', []).append((safe_name, temp_bodies))
-                _dbg('  row {} snapshotted'.format(i))
                 progress.progressValue = i + 1
         finally:
             # Restore the source model — re-derive fresh per parameter, since each
@@ -495,7 +471,6 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 if not ctx['warnings']:
                     ctx['warnings'] = ['no solid bodies matched']
                 continue
-            _dbg("profile '{}': creating output doc, {} variant(s)".format(ctx['name'], len(variants)))
             new_doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
             nd = adsk.fusion.Design.cast(new_doc.products.itemByProductType('DesignProductType'))
             root = nd.rootComponent
@@ -539,18 +514,13 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                             a = _appearance_in(nd, appr)
                             if a:
                                 nb.appearance = a
-                    except Exception as e:
-                        _dbg('appearance/material apply failed: ' + str(e).splitlines()[0])
+                    except Exception:
+                        pass  # geometry is built; a failed look just stays default
                 x_cursor += (max_x - min_x) + spacing_cm
                 ctx['built'] += 1
-    except Exception:
-        _dbg('BUILD FAILED:\n' + traceback.format_exc())
-        raise
     finally:
         progress.hide()
 
-    _dbg('=== build_exports done: ' + '; '.join(
-        '{}={}'.format(c['name'], c['built']) for c in active) + ' ===')
     return contexts
 
 
