@@ -341,6 +341,27 @@ RESOLVERS = {
 }
 
 
+def _appearance_in(design, src_appr):
+    """The appearance named like ``src_appr`` inside ``design``, copied in once if
+    needed. Lets a copied body show the source body's appearance (temporary BReps
+    lose it). Returns None if it can't be copied."""
+    try:
+        existing = design.appearances.itemByName(src_appr.name)
+        return existing or design.appearances.addByCopy(src_appr, src_appr.name)
+    except Exception:
+        return None
+
+
+def _material_in(design, src_mat):
+    """The material named like ``src_mat`` inside ``design``, copied in once if
+    needed. Returns None if it can't be copied."""
+    try:
+        existing = design.materials.itemByName(src_mat.name)
+        return existing or design.materials.addByCopy(src_mat, src_mat.name)
+    except Exception:
+        return None
+
+
 def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
     """Build one new design per enabled profile. Each profile is built into its
     own document (created before parameters are edited, so the source model is in
@@ -436,9 +457,19 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                     temp_bodies = []
                     for body in src_bodies:
                         try:
-                            temp_bodies.append(tbm.copy(body))
+                            tmp = tbm.copy(body)
+                        except Exception:
+                            continue
+                        appr = mat = None
+                        try:
+                            appr = body.appearance   # body-level override, or None
                         except Exception:
                             pass
+                        try:
+                            mat = body.material
+                        except Exception:
+                            pass
+                        temp_bodies.append((tmp, appr, mat))
                     if temp_bodies:
                         ctx.setdefault('variants', []).append((safe_name, temp_bodies))
                 _dbg('  row {} snapshotted'.format(i))
@@ -475,19 +506,36 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
 
             x_cursor = 0.0
             for safe_name, temp_bodies in variants:
-                min_x = min(tb.boundingBox.minPoint.x for tb in temp_bodies)
-                max_x = max(tb.boundingBox.maxPoint.x for tb in temp_bodies)
+                tmps = [t for (t, _a, _m) in temp_bodies]
+                min_x = min(tb.boundingBox.minPoint.x for tb in tmps)
+                max_x = max(tb.boundingBox.maxPoint.x for tb in tmps)
                 transform = adsk.core.Matrix3D.create()
                 transform.translation = adsk.core.Vector3D.create(x_cursor - min_x, 0.0, 0.0)
                 occ = root.occurrences.addNewComponent(transform)
                 occ.component.name = safe_name
                 base = occ.component.features.baseFeatures.add()
+                added = []
                 base.startEdit()
                 try:
-                    for tb in temp_bodies:
-                        occ.component.bRepBodies.add(tb, base)
+                    for tmp, appr, mat in temp_bodies:
+                        added.append((occ.component.bRepBodies.add(tmp, base), appr, mat))
                 finally:
                     base.finishEdit()
+                # Re-apply the source look (temporary BReps lose material/appearance).
+                # Best-effort: the geometry is already built, so any failure here
+                # just leaves the default look rather than breaking the build.
+                for nb, appr, mat in added:
+                    try:
+                        if mat:
+                            m = _material_in(nd, mat)
+                            if m:
+                                nb.material = m
+                        if appr:
+                            a = _appearance_in(nd, appr)
+                            if a:
+                                nb.appearance = a
+                    except Exception as e:
+                        _dbg('appearance/material apply failed: ' + str(e).splitlines()[0])
                 x_cursor += (max_x - min_x) + spacing_cm
                 ctx['built'] += 1
     except Exception:
