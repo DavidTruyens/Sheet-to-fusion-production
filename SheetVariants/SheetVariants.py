@@ -708,8 +708,8 @@ def _run_build_validation(inputs):
 
 
 def _refresh_test_rows(inputs):
-    """Repopulate the 'testRow' dropdown from the currently chosen tab. Used by
-    the standalone Test Variant Row command as sheetUrl/tab/loadTabs change."""
+    """Repopulate the Test tab's 'testRow' dropdown from the currently chosen
+    tab, called as sheetUrl/tab/loadTabs change in the Build dialog."""
     url = _find_input(inputs, 'sheetUrl').value.strip()
     row_dd = _find_input(inputs, 'testRow')
     row_dd.listItems.clear()
@@ -728,15 +728,16 @@ def _refresh_test_rows(inputs):
 
 
 def _preview_test_row(inputs):
-    """Apply the selected variant row ('testRow') to the model as a live preview.
+    """Apply the Test tab's selected variant row to the model as a live preview.
 
-    Called only from the Test Variant Row command's executePreview, the one
-    place Fusion allows temporary model edits during a command. Changes are NOT
-    marked as a valid result, so Fusion automatically reverts them when the
-    dialog closes — the user inspects the variant while browsing, and the model
-    returns to its original values."""
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    if not design:
+    Called from the Build command's executePreview — the one place Fusion allows
+    temporary model edits during a command. Only previews while the Test tab is
+    the active tab; changes are NOT marked as a valid result, so Fusion reverts
+    them when the dialog closes (or before OK/Build runs)."""
+    tab_test = _find_input(inputs, 'tabTest')
+    if not (tab_test and tab_test.isActive):
+        return  # only preview while the Test tab is showing
+    if not adsk.fusion.Design.cast(app.activeProduct):
         return
     row_item = _find_input(inputs, 'testRow').selectedItem
     if not row_item or row_item.name.startswith('—'):
@@ -753,17 +754,17 @@ def _preview_test_row(inputs):
     if idx >= len(data):
         return
     row = data[idx]
-    all_params = design.allParameters
     for col, pname in enumerate(param_names, start=1):
         if col >= len(row):
             continue
         val = row[col].strip()
         if not val:
             continue
-        param = all_params.itemByName(pname)
-        if param:
+        # Re-derive fresh per parameter: a recompute can invalidate the collection.
+        p = adsk.fusion.Design.cast(app.activeProduct).allParameters.itemByName(pname)
+        if p:
             try:
-                apply_expression(param, val)
+                apply_expression(p, val)
             except Exception:
                 pass  # a bad cell just doesn't preview; never crash the preview
 
@@ -842,6 +843,18 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             spacing_in.tooltip = ('Clear space left between each variant\'s bounding box along X. '
                                   'Set 0 to butt them together.')
 
+            # --- Test tab ----------------------------------------------------#
+            tab_test = inputs.addTabCommandInput('tabTest', 'Test').children
+            row_dd = tab_test.addDropDownCommandInput(
+                'testRow', 'Variant row', adsk.core.DropDownStyles.TextListDropDownStyle)
+            row_dd.listItems.add('— load a tab first —', True)
+            row_dd.tooltip = 'Pick a row to preview it live on the model.'
+            test_note = tab_test.addTextBoxCommandInput('testNote', '', '', 3, True)
+            test_note.isFullWidth = True
+            test_note.text = ('Load a tab in the Sheet tab, then pick a row here to preview it live '
+                              'on the model. It reverts when you close the dialog (Cancel); click OK '
+                              'to build the output sets.')
+
             # --- Output sets tab ---------------------------------------------#
             tab_output = inputs.addTabCommandInput('tabOutput', 'Output sets').children
 
@@ -877,6 +890,10 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             on_changed = BuildInputChangedHandler()
             cmd.inputChanged.add(on_changed)
             _handlers.append(on_changed)
+
+            on_preview = BuildExecutePreviewHandler()
+            cmd.executePreview.add(on_preview)
+            _handlers.append(on_preview)
 
             on_validate = ValidateInputsHandler()
             cmd.validateInputs.add(on_validate)
@@ -935,6 +952,7 @@ class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
                     _find_input(inputs, 'report').formattedText = \
                         'This link has no selectable tabs; it will be read as a single CSV.'
                     _build_report['ok'] = True
+                    _refresh_test_rows(inputs)
                     return
                 settings = sheet_core.load_settings(SETTINGS_FILE)
                 sid = sheet_core.extract_spreadsheet_id(url)
@@ -942,8 +960,10 @@ class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
                 for i, name in enumerate(tabs):
                     tab_dd.listItems.add(name, name == pinned or (not pinned and i == 0))
                 _run_build_validation(inputs)
+                _refresh_test_rows(inputs)
             elif changed.id in ('tab', 'sheetUrl'):
                 _run_build_validation(inputs)
+                _refresh_test_rows(inputs)
         except Exception:
             if ui:
                 ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
@@ -957,95 +977,11 @@ class ValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
             args.areInputsValid = True
 
 
-class TestRowCreatedHandler(adsk.core.CommandCreatedEventHandler):
-    def notify(self, args):
-        try:
-            cmd = args.command
-            cmd.setDialogInitialSize(460, 260)
-            inputs = cmd.commandInputs
-
-            settings = sheet_core.load_settings(SETTINGS_FILE)
-            design0 = adsk.fusion.Design.cast(app.activeProduct)
-            url0 = load_design_url(design0)
-
-            url_in = inputs.addStringValueInput('sheetUrl', 'Google Sheet URL', url0)
-            url_in.tooltip = 'Share link or published-to-web CSV link of the sheet that holds your variants.'
-
-            load_btn = inputs.addBoolValueInput('loadTabs', 'Load tabs', False, '', False)
-            load_btn.tooltip = 'Fetch the sheet and list its tabs.'
-
-            tab_dd = inputs.addDropDownCommandInput(
-                'tab', 'Tab', adsk.core.DropDownStyles.TextListDropDownStyle)
-            tab_dd.tooltip = 'Which worksheet tab holds your variant rows.'
-            sid0 = sheet_core.extract_spreadsheet_id(url0)
-            pinned0 = load_pinned_tab(settings, sid0) if sid0 else ''
-            if pinned0:
-                tab_dd.listItems.add(pinned0, True)
-            else:
-                tab_dd.listItems.add('— click Load tabs —', True)
-
-            row_dd = inputs.addDropDownCommandInput(
-                'testRow', 'Variant row', adsk.core.DropDownStyles.TextListDropDownStyle)
-            row_dd.listItems.add('— load a tab first —', True)
-            row_dd.tooltip = 'Pick a row to preview it live on the model.'
-
-            note = inputs.addTextBoxCommandInput('testNote', '', '', 3, True)
-            note.isFullWidth = True
-            note.text = ('Load a tab, then pick a row to preview it live on the model. '
-                         'The model reverts to its original values when you close this dialog.')
-
-            on_changed = TestRowInputChangedHandler()
-            cmd.inputChanged.add(on_changed)
-            _handlers.append(on_changed)
-
-            on_preview = TestRowPreviewHandler()
-            cmd.executePreview.add(on_preview)
-            _handlers.append(on_preview)
-        except Exception:
-            if ui:
-                ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
-
-
-class TestRowInputChangedHandler(adsk.core.InputChangedEventHandler):
-    def notify(self, args):
-        try:
-            changed = args.input
-            inputs = changed.parentCommand.commandInputs
-            if changed.id == 'loadTabs' and changed.value:
-                changed.value = False
-                url = _find_input(inputs, 'sheetUrl').value.strip()
-                tab_dd = _find_input(inputs, 'tab')
-                _xlsx_cache["url"] = None
-                _xlsx_cache["bytes"] = None
-                _rows_cache["key"] = None
-                try:
-                    tabs = list_tabs(url)
-                except Exception as e:
-                    ui.messageBox('Could not read the sheet:\n{}'.format(e))
-                    return
-                save_design_url(adsk.fusion.Design.cast(app.activeProduct), url)
-                tab_dd.listItems.clear()
-                if not tabs:
-                    tab_dd.listItems.add(CSV_ONLY_TAB_LABEL, True)
-                else:
-                    settings = sheet_core.load_settings(SETTINGS_FILE)
-                    sid = sheet_core.extract_spreadsheet_id(url)
-                    pinned = load_pinned_tab(settings, sid) if sid else ''
-                    for i, name in enumerate(tabs):
-                        tab_dd.listItems.add(name, name == pinned or (not pinned and i == 0))
-                _refresh_test_rows(inputs)
-            elif changed.id in ('tab', 'sheetUrl'):
-                _refresh_test_rows(inputs)
-        except Exception:
-            if ui:
-                ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
-
-
-class TestRowPreviewHandler(adsk.core.CommandEventHandler):
+class BuildExecutePreviewHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         try:
             _preview_test_row(args.command.commandInputs)
-            # Leave args.isValidResult False so the preview reverts on close.
+            # Leave args.isValidResult False so the preview reverts on close/OK.
         except Exception:
             pass
 
@@ -1185,15 +1121,9 @@ def run(context):
         tmpl_def.commandCreated.add(on_tmpl_created)
         _handlers.append(on_tmpl_created)
 
-        test_def = cmd_defs.addButtonDefinition(TEST_CMD_ID, TEST_CMD_NAME,
-                                                TEST_CMD_DESC, BUILD_ICON_FOLDER)
-        on_test_created = TestRowCreatedHandler()
-        test_def.commandCreated.add(on_test_created)
-        _handlers.append(on_test_created)
-
         panel = get_manage_panel()
         if panel:
-            for cmd_id, definition in ((CMD_ID, cmd_def), (TEST_CMD_ID, test_def), (TEMPLATE_CMD_ID, tmpl_def)):
+            for cmd_id, definition in ((CMD_ID, cmd_def), (TEMPLATE_CMD_ID, tmpl_def)):
                 control = panel.controls.itemById(cmd_id) or panel.controls.addCommand(definition)
                 if control:
                     # Show both buttons directly on the panel (not just the overflow).
