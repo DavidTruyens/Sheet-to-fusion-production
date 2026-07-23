@@ -518,6 +518,18 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                         pass  # geometry is built; a failed look just stays default
                 x_cursor += (max_x - min_x) + spacing_cm
                 ctx['built'] += 1
+            # Frame the finished layout. A fresh document opens with the default
+            # empty-scene camera, so the built variants sit outside the view.
+            # goHome() is the ViewCube Home button; fit() covers home views that
+            # are not set to fit. Best-effort — a camera failure must not fail
+            # the build. The new doc is still active here (documents.add
+            # activates it), so activeViewport is this profile's viewport.
+            try:
+                adsk.doEvents()
+                app.activeViewport.goHome(False)
+                app.activeViewport.fit()
+            except Exception:
+                pass
     finally:
         progress.hide()
 
