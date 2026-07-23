@@ -868,6 +868,11 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 tab_dd.listItems.add(pinned0, True)
             else:
                 tab_dd.listItems.add('— click Load tabs —', True)
+            # Only the pinned/placeholder item exists until Load tabs fetches
+            # the real list, so keep the dropdown grayed out: enabled, it reads
+            # as "tabs are loaded". The pinned selection still validates and
+            # builds while disabled; Load tabs re-enables it with the full list.
+            tab_dd.isEnabled = False
 
             report = tab_sheet.addTextBoxCommandInput('report', 'Check', '', 6, True)
             report.isFullWidth = True
@@ -984,6 +989,8 @@ class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
                 tab_dd.listItems.clear()
                 if not tabs:
                     tab_dd.listItems.add(CSV_ONLY_TAB_LABEL, True)
+                    # Single-CSV link: only the sentinel item, nothing to pick.
+                    tab_dd.isEnabled = False
                     _find_input(inputs, 'report').formattedText = \
                         'This link has no selectable tabs; it will be read as a single CSV.'
                     _build_report['ok'] = True
@@ -994,6 +1001,7 @@ class BuildInputChangedHandler(adsk.core.InputChangedEventHandler):
                 pinned = load_pinned_tab(settings, sid) if sid else ''
                 for i, name in enumerate(tabs):
                     tab_dd.listItems.add(name, name == pinned or (not pinned and i == 0))
+                tab_dd.isEnabled = True  # real tab list is in — allow picking
                 _run_build_validation(inputs)
                 _refresh_test_rows(inputs)
             elif changed.id in ('tab', 'sheetUrl'):
