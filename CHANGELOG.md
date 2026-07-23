@@ -9,6 +9,16 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
 - **Filter by thickness** — filter which variants or components are built/exported
   by their material thickness.
 
+## 1.13.0 — Framed builds, clearer tab loading
+
+- **Built designs open framed** — after a build, each output design is framed
+  like the ViewCube **Home** view (plus a fit), instead of opening on the
+  default empty-scene camera with the variants out of view.
+- **Tab dropdown grayed until loaded** — on the *Sheet* tab, the **Tab**
+  dropdown is disabled until **Load tabs** fetches the real tab list, so a
+  pinned tab no longer looks like an already-loaded list. The pinned tab still
+  validates and builds while grayed; single-CSV links keep it disabled.
+
 ## 1.12.0 — Google Sheet integration
 
 The add-in reads a Google Sheet of parameter values and builds a production
