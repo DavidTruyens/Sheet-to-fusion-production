@@ -2079,7 +2079,7 @@ git commit -m "feat: build child components from mother, config and placeholder 
 **Interfaces:**
 - Consumes: `placeholder_core.{pair_bodies, migrate_child_recipe, loads_attr}` from Tasks 2 and 5.
 - Produces:
-  - `build_engine.rebuild_base_feature(component, base, snaps, ops) -> None`
+  - `build_engine.rebuild_base_feature(component, base, snaps, ops) -> str` — `""` on success, else a human-readable failure reason. It does **not** raise: spike 3 showed `finishEdit()` can throw when a downstream feature was built on the old topology, and that must fail one child, not the run.
   - `build_engine.find_base_feature(component) -> BaseFeature|None`
   - `placeholder_cmds.attribute_list(found) -> list[Attribute]` — normalises the `AttributeVector` that `Design.findAttributes()` returns (see the note in the code; it is **not** a Fusion collection)
   - `placeholder_cmds.find_children(design) -> dict[slot_id, (occurrence, recipe)]`
@@ -2129,10 +2129,26 @@ def rebuild_base_feature(component, base, snaps, ops):
     which recomputes and invalidates collections fetched across it. Spike 3 hit
     "RuntimeError: 3 : Bad index parameter" doing it the other way round. (It
     also keeps indices stable, since a removal would shift them.)
+
+    Spike 3 also established that base.bodies must be read INSIDE the edit: the
+    documented dual behaviour is real, and outside the edit it returns the
+    downstream RESULT body (a filleted 997.9) rather than the SOURCE body (1000.0)
+    that updateBody demands. Passing the result body fails with "Invalid argument
+    sourceBody. Not a source body for this base feature".
+
+    finishEdit() is where the designer's downstream features recompute, and it CAN
+    RAISE — spike 3 measured InternalValidationError when a fillet built on an edge
+    of the old geometry could not be rebuilt on the new. Raising there destroys
+    that feature and leaves the body unreadable. That is a per-child failure, not a
+    run-ending one, so it is caught and returned rather than propagated.
+
+    Returns "" on success, or a human-readable reason the rebuild failed.
     """
-    existing = base_feature_bodies(component, base)
+    existing = None
     base.startEdit()
     try:
+        # Inside the edit: base.bodies is now the base feature's SOURCE bodies.
+        existing = base_feature_bodies(component, base)
         for kind, old_index, new_index in ops:
             if kind == 'update':
                 base.updateBody(existing[old_index], snaps[new_index]['temp'])
@@ -2140,9 +2156,28 @@ def rebuild_base_feature(component, base, snaps, ops):
                 component.bRepBodies.add(snaps[new_index]['temp'], base)
             elif kind == 'remove':
                 existing[old_index].deleteMe()
-    finally:
+    except Exception as err:
+        try:
+            base.finishEdit()
+        except Exception:
+            pass
+        return 'geometry swap failed: {}'.format(err)
+    try:
         base.finishEdit()
+    except Exception as err:
+        # A feature the designer built on the OLD geometry's topology (a fillet or
+        # chamfer on an edge, a sketch on a generated face) could not be recomputed
+        # against the new shape. Fusion destroys it and leaves the body unreadable.
+        return ('a feature built on the old geometry could not be recomputed '
+                '({}). Anchor cuts to origin planes rather than to generated '
+                'faces or edges.'.format(err))
+    return ''
 ```
+
+**Note on `base_feature_bodies()`:** spike 3 confirmed `base.bodies` is populated
+(count 1 with a fillet on top), so its `try` branch is the real path. Because the
+call has moved INSIDE the edit, it now returns source bodies — which is what
+`updateBody()` requires.
 
 - [ ] **Step 2: Add child discovery and rebuild to `placeholder_cmds`**
 
@@ -2193,7 +2228,11 @@ def rebuild_child(design, occurrence, recipe, snaps, matrix16):
     if base is None:
         return '{} — cannot rebuild: its base feature was deleted'.format(component.name)
     ops = placeholder_core.pair_bodies(recipe['bodies'], [s['name'] for s in snaps])
-    build_engine.rebuild_base_feature(component, base, snaps, ops)
+    failure = build_engine.rebuild_base_feature(component, base, snaps, ops)
+    if failure:
+        # The geometry may be in a bad state, so do not re-place or re-skin it.
+        # Report and leave it for the user to inspect.
+        return '{} — rebuild failed: {}'.format(component.name, failure)
     build_engine.reapply_looks(design, component, snaps)
     matrix = adsk.core.Matrix3D.create()
     matrix.setWithArray(matrix16)
@@ -2248,7 +2287,11 @@ Expected: no output.
 This is the step that proves the design's central claim. Using a layout filled in Task 9:
 
 1. On one child, **add a downstream feature by hand** — cut a hole through it, or fillet an edge. Confirm it appears after the base feature in that component's timeline.
-2. Re-run **Fill Placeholders** on that same box's front face, choosing a **different config**. Confirm: the geometry changes, the component is **not** recreated, and **your hole is still there** (or is flagged by Fusion as an errored feature, which is the acceptable outcome the spec names — silently vanishing is not).
+2. Re-run **Fill Placeholders** on that same box's front face, choosing a **different config**. Confirm: the geometry changes, the component is **not** recreated, and **your hole is still there**, healthy, cut through the *new* geometry.
+
+   Spike 3 measured this precisely, so the expected result depends on how you anchored the cut:
+   - **Sketch on an origin plane** → survives cleanly, health `healthy`. This is the case that must work.
+   - **Fillet/chamfer on an edge, or a sketch on a generated face** → `finishEdit()` raises and the feature is destroyed. Expected, not a bug — but it must be *reported* as `rebuild failed: a feature built on the old geometry could not be recomputed`, and the run must continue to the other children. Test this case deliberately and confirm you get that message rather than a traceback or a silent loss.
 3. Move the placeholder box, re-run Fill on it → the child moves to the new position and the hole moves with it, staying in the same place *on the cabinet*.
 4. Resize the placeholder box, re-run Fill → the child is rebuilt at the new size.
 5. Pick a config with a **different number of bodies** than the current one and confirm bodies are added or removed rather than the rebuild failing.
