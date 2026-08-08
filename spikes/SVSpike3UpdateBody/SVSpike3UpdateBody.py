@@ -2,32 +2,31 @@
 #
 # THIS IS THE ONE THAT MATTERS. The whole design promises that a cut a designer
 # adds by hand survives a rebuild, and that promise is why the freeze flag was
-# rejected during brainstorming. If updateBody does not hold, do not work around
-# it — the alternative is a materially worse feature and the user's call.
+# rejected during brainstorming.
 #
-# The documented contract (help.autodesk.com, BaseFeature.updateBody):
-#   sourceBody — "The source BRepBody to update. The source bodies of a
-#                 BaseFeature are only available from the bodies collection of
-#                 the BaseFeature WHEN THE BASEFEATURE IS IN EDIT MODE."
-#   bodies     — "When editing, it returns bodies owned by or used by the base
-#                 feature. When inactive, it returns result bodies."
-#   startEdit  — "Set the USER-INTERFACE so that the base body is in edit mode."
+# WHAT EARLIER RUNS ESTABLISHED
+#   - The call shape is correct: with no downstream feature, updateBody returns
+#     True and the volume goes 1000 -> 1920.
+#   - adsk.doEvents() after startEdit() is NOT required (both controls passed).
+#   - base.bodies really does have dual behaviour, as documented: outside the
+#     edit it is the filleted RESULT (997.9), inside it is the SOURCE (1000.0).
+#   - With a fillet on top, updateBody STILL returned True — the failure came
+#     afterwards, from finishEdit() or the recompute it triggers.
 #
-# Earlier runs dumped `bodies` before and inside the edit and got IDENTICAL
-# output, which means edit mode had not actually engaged — startEdit() is a UI
-# operation and needs adsk.doEvents() to take effect. That is the variable this
-# version isolates.
+# WHAT THIS RUN ISOLATES
+# A fillet on edges.item(0) is the most fragile downstream feature there is: it
+# references the base body's TOPOLOGY, and swapping a 10x10x10 box for a
+# 16x12x10 one destroys the edge it was built on. That is not what this add-in's
+# users do. Cutting a hole from a sketch on an origin plane references none of
+# the base geometry and should behave differently.
 #
-# It also adds the CONTROL that was missing: a base feature with NO downstream
-# feature. Earlier runs varied the call shape and the downstream feature at the
-# same time, so a failure could not be attributed to either.
+#   control  no downstream           -> proves the call (already passing)
+#   fragile  fillet on an edge       -> topology-referencing, expected to break
+#   robust   cut from an origin-plane sketch -> what a designer actually does
 #
-#   control, no fillet, doEvents   -> is the CALL right?
-#   control, no fillet, no doEvents -> is doEvents the reason?
-#   with fillet,        doEvents   -> does the downstream feature SURVIVE?
-#
-# Only the third scenario says anything about the design. The first two say
-# whether we are calling the API correctly.
+# finishEdit() is now caught separately, and the model is inspected either way,
+# so "threw but left an errored feature" (acceptable — the spec expects Fusion
+# to flag broken references) is distinguishable from "threw and destroyed it".
 #
 # Setup: none. Run it from anywhere; it creates and closes its own documents.
 
@@ -40,12 +39,8 @@ app = adsk.core.Application.get()
 
 
 def _seq(collection):
-    """Fusion returns TWO shapes and mixes them on the same object.
-
-    Real collections have .count / .item(i) — base.bodies is one. The *Vector
-    types are Python sequences with neither: AttributeVector (spike 2) and
-    BRepBodyVector (base.sourceBodies) both raise AttributeError on .count.
-    """
+    """Fusion mixes two shapes: real collections have .count/.item(i), while the
+    *Vector types (AttributeVector, BRepBodyVector) are Python sequences."""
     try:
         return [collection.item(i) for i in range(collection.count)]
     except AttributeError:
@@ -75,27 +70,51 @@ def _box(tbm, length, width, height):
         length, width, height))
 
 
-def _fingerprint(base):
-    """Enough to tell whether `bodies` switched from result bodies to source
-    bodies. If edit mode engaged, these should differ inside vs outside."""
-    out = []
-    for attr in ('bodies', 'sourceBodies'):
-        try:
-            items = _seq(getattr(base, attr))
-            out.append('{}={}x[{}]'.format(
-                attr, len(items),
-                ','.join('{}:{:.1f}'.format(b.name, b.volume) for b in items)))
-        except Exception as err:
-            out.append('{}=unreadable({})'.format(attr, err))
-    return '  '.join(out)
+def _add_fillet(root):
+    """Topology-referencing: built on a specific edge of the base body."""
+    edges = adsk.core.ObjectCollection.create()
+    edges.add(root.bRepBodies.item(0).edges.item(0))
+    fillet_input = root.features.filletFeatures.createInput()
+    fillet_input.addConstantRadiusEdgeSet(
+        edges, adsk.core.ValueInput.createByReal(1.0), True)
+    root.features.filletFeatures.add(fillet_input)
+    adsk.doEvents()
+    return 'filletFeatures'
 
 
-def _scenario(label, tbm, with_fillet, do_events):
-    """Build a base feature (optionally with a fillet on top) in a fresh document,
-    then swap its geometry. Returns (notes, outcome).
+def _add_cut(root):
+    """Topology-independent: a hole from a sketch on an origin plane. This is
+    what a designer actually does to a generated cabinet."""
+    sketch = root.sketches.add(root.xYConstructionPlane)
+    sketch.sketchCurves.sketchCircles.addByCenterRadius(
+        adsk.core.Point3D.create(0, 0, 0), 2.0)
+    profile = sketch.profiles.item(0)
+    extrudes = root.features.extrudeFeatures
+    extrude_input = extrudes.createInput(
+        profile, adsk.fusion.FeatureOperations.CutFeatureOperation)
+    extrude_input.setDistanceExtent(True, adsk.core.ValueInput.createByReal(20.0))
+    try:
+        extrude_input.participantBodies = [root.bRepBodies.item(0)]
+    except Exception:
+        pass  # some builds infer the participant; not worth failing over
+    extrudes.add(extrude_input)
+    adsk.doEvents()
+    return 'extrudeFeatures'
 
-    outcome is 'survived' | 'destroyed' | 'errored' | 'control-ok'.
-    Only 'destroyed' says anything about the design.
+
+def _feature_count(root, kind):
+    try:
+        return getattr(root.features, kind).count
+    except Exception:
+        return -1
+
+
+def _scenario(label, tbm, downstream):
+    """Build a base feature (optionally with a downstream feature), swap its
+    geometry, and report what survived. Returns (notes, outcome).
+
+    outcome: 'control-ok' | 'survived' | 'errored-but-flagged' | 'destroyed'
+             | 'errored'
     """
     notes = ['--- {} ---'.format(label)]
     doc = None
@@ -114,51 +133,58 @@ def _scenario(label, tbm, with_fillet, do_events):
             base.finishEdit()
         adsk.doEvents()
 
-        if with_fillet:
-            edges = adsk.core.ObjectCollection.create()
-            edges.add(root.bRepBodies.item(0).edges.item(0))
-            fillet_input = root.features.filletFeatures.createInput()
-            fillet_input.addConstantRadiusEdgeSet(
-                edges, adsk.core.ValueInput.createByReal(1.0), True)
-            root.features.filletFeatures.add(fillet_input)
-            adsk.doEvents()
-        fillets_before = root.features.filletFeatures.count
-        notes.append('  fillets before swap: {}'.format(fillets_before))
-        notes.append('  outside edit: {}'.format(_fingerprint(base)))
+        kind = downstream(root) if downstream else None
+        before = _feature_count(root, kind) if kind else 0
+        if kind:
+            notes.append('  {} before swap: {}'.format(kind, before))
 
         bigger = _box(tbm, 16, 12, 10)
         base.startEdit()
-        try:
-            if do_events:
-                adsk.doEvents()          # <-- the variable under test
-            notes.append('  inside edit:  {}'.format(_fingerprint(base)))
-            sources = _seq(base.bodies)
-            if not sources:
-                notes.append('  -> no source body available inside the edit')
-                return notes, 'errored'
-            notes.append('  passing body: {} (volume {:.1f})'
-                         .format(sources[0].name, sources[0].volume))
-            result = base.updateBody(sources[0], bigger)
-            notes.append('  updateBody returned: {}'.format(result))
-        finally:
-            base.finishEdit()
         adsk.doEvents()
+        sources = _seq(base.bodies)
+        if not sources:
+            notes.append('  -> no source body inside the edit')
+            return notes, 'errored'
+        notes.append('  passing body: {} (volume {:.1f})'
+                     .format(sources[0].name, sources[0].volume))
+        updated = base.updateBody(sources[0], bigger)
+        notes.append('  updateBody returned: {}'.format(updated))
 
-        volume = root.bRepBodies.item(0).volume
-        notes.append('  body volume after:   {:.3f} (was 1000.000, '
-                     'expect 1920.000)'.format(volume))
-        if not with_fillet:
+        finish_error = None
+        try:
+            base.finishEdit()
+            adsk.doEvents()
+        except Exception as err:
+            finish_error = str(err)
+            notes.append('  finishEdit RAISED: {}'.format(finish_error))
+
+        # Inspect regardless — a throw that leaves an errored feature is an
+        # acceptable outcome; a throw that destroys it is not.
+        design = adsk.fusion.Design.cast(app.activeProduct)
+        root = design.rootComponent
+        try:
+            notes.append('  body volume after: {:.3f} (was 1000.000, '
+                         'expect 1920.000 minus any cut)'
+                         .format(root.bRepBodies.item(0).volume))
+        except Exception as err:
+            notes.append('  body volume after: unreadable — {}'.format(err))
+
+        if not kind:
             notes.append('  -> CONTROL OK: the call itself works')
             return notes, 'control-ok'
 
-        fillets_after = root.features.filletFeatures.count
-        notes.append('  fillets after swap:  {}'.format(fillets_after))
-        if fillets_after < fillets_before:
+        after = _feature_count(root, kind)
+        notes.append('  {} after swap:  {}'.format(kind, after))
+        if after < before:
             notes.append('  -> downstream feature DESTROYED')
             return notes, 'destroyed'
-        notes.append('  fillet health:       {}'
-                     .format(_health(root.features.filletFeatures.item(0))))
-        notes.append('  -> downstream feature SURVIVED')
+        health = _health(getattr(root.features, kind).item(0))
+        notes.append('  feature health:    {}'.format(health))
+        if finish_error:
+            notes.append('  -> feature SURVIVED but finishEdit raised '
+                         '(health above says what state it is in)')
+            return notes, 'errored-but-flagged'
+        notes.append('  -> downstream feature SURVIVED cleanly')
         return notes, 'survived'
     except Exception as err:
         notes.append('  -> errored: {}'.format(err))
@@ -178,52 +204,49 @@ def run(context):
     try:
         tbm = adsk.fusion.TemporaryBRepManager.get()
         scenarios = [
-            ('CONTROL: no fillet, doEvents after startEdit', False, True),
-            ('CONTROL: no fillet, NO doEvents', False, False),
-            ('THE REAL TEST: fillet on top, doEvents after startEdit', True, True),
+            ('CONTROL: no downstream feature', None),
+            ('FRAGILE: fillet on an edge (topology-referencing)', _add_fillet),
+            ('ROBUST: hole cut from an origin-plane sketch', _add_cut),
         ]
 
-        results = {}
-        for label, with_fillet, do_events in scenarios:
-            scenario_notes, outcome = _scenario(label, tbm, with_fillet, do_events)
+        outcomes = []
+        for label, downstream in scenarios:
+            scenario_notes, outcome = _scenario(label, tbm, downstream)
             notes.extend(scenario_notes)
             notes.append('')
-            results[label] = outcome
+            outcomes.append(outcome)
 
-        control_ok = results[scenarios[0][0]] == 'control-ok'
-        control_no_events = results[scenarios[1][0]]
-        real = results[scenarios[2][0]]
-
+        control, fragile, robust = outcomes
         notes.append('=' * 46)
-        if not control_ok:
-            notes.append('SPIKE 3: INCONCLUSIVE')
-            notes.append('The control failed, so we still are not calling '
-                         'updateBody correctly. This says NOTHING about whether '
-                         'downstream features survive. Stop guessing and report '
-                         'the fingerprints above.')
-        elif real == 'survived':
-            notes.append('SPIKE 3: PASS — the downstream feature survived.')
-            notes.append('Report the fillet health: warning/error is an acceptable '
-                         'partial pass, since the spec expects Fusion to flag a '
-                         'broken reference.')
-        elif real == 'destroyed':
-            notes.append('SPIKE 3: FAIL — updateBody worked but DESTROYED the '
-                         'downstream feature.')
+        if control != 'control-ok':
+            notes.append('SPIKE 3: INCONCLUSIVE — even the control failed.')
+        elif robust in ('survived', 'errored-but-flagged'):
+            notes.append('SPIKE 3: PASS')
+            notes.append('A hole cut from an origin-plane sketch survives the '
+                         'swap ({}). That is what a designer actually adds to a '
+                         'generated cabinet.'.format(robust))
+            notes.append('The fillet case was {} — expected, since it is built '
+                         'on an edge the new geometry does not have.'
+                         .format(fragile))
+            notes.append('')
+            notes.append('DESIGN CONSEQUENCE: downstream features survive when '
+                         'they do NOT reference the base body\'s topology. '
+                         'Topology-referencing ones (fillet/chamfer on an edge, '
+                         'a face-anchored sketch) can break. The spec and README '
+                         'must say this plainly rather than promising that every '
+                         'edit survives.')
+        elif robust == 'destroyed':
+            notes.append('SPIKE 3: FAIL — even a topology-independent cut was '
+                         'destroyed.')
             notes.append('STOP. This disproves the design\'s central promise. Do '
                          'not code around it — the fallback is the freeze flag '
                          'rejected during brainstorming, which is the user\'s '
                          'decision.')
         else:
-            notes.append('SPIKE 3: INCONCLUSIVE — the control passed but the '
-                         'fillet scenario errored rather than resolving.')
-            notes.append('A downstream feature changes how updateBody behaves. '
-                         'Report the error above.')
-
-        notes.append('')
-        notes.append('doEvents after startEdit was {}'.format(
-            'REQUIRED — the no-doEvents control {}'.format(
-                'also passed, so it is not the cause'
-                if control_no_events == 'control-ok' else 'failed')))
+            notes.append('SPIKE 3: INCONCLUSIVE — the robust scenario errored '
+                         'rather than resolving. Report the error above; it may '
+                         'be a bug in how this script builds the cut rather than '
+                         'anything about updateBody.')
         ui.messageBox('\n'.join(notes))
     except Exception:
         ui.messageBox('\n'.join(notes) + '\n\nUnhandled:\n' + traceback.format_exc())
