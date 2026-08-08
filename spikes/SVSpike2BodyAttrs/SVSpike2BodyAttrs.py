@@ -22,6 +22,24 @@ NAME = 'slotId'
 VALUE = 'slot-deadbeef'
 
 
+def _attribute_list(found):
+    """findAttributes() returns an AttributeVector, which is NOT a Fusion
+    collection — it has no .count/.item(i). Try each shape and report which one
+    works, so the plans can use the proven access pattern rather than a guess."""
+    try:
+        return [found.item(i) for i in range(found.count)], 'count/item'
+    except AttributeError:
+        pass
+    try:
+        return [found[i] for i in range(len(found))], 'len/index'
+    except (TypeError, AttributeError):
+        pass
+    try:
+        return list(found), 'iteration'
+    except TypeError:
+        return None, 'NONE WORKED'
+
+
 def run(context):
     app = adsk.core.Application.get()
     ui = app.userInterface
@@ -57,12 +75,21 @@ def run(context):
         direct_ok = existing.value == VALUE
 
         found = design.findAttributes(GROUP, NAME)
-        notes.append('findAttributes count: {}'.format(found.count))
-        find_ok = found.count >= 1
+        notes.append('findAttributes returns: {}'.format(type(found).__name__))
+        attributes, access = _attribute_list(found)
+        notes.append('working access pattern: {}   <-- USE THIS IN THE PLANS'
+                     .format(access))
+        if attributes is None:
+            notes.append('')
+            notes.append('SPIKE 2: FAIL — findAttributes result is unreadable, so '
+                         'child and slot discovery needs a different mechanism.')
+            ui.messageBox('\n'.join(notes))
+            return
+        notes.append('findAttributes count: {}'.format(len(attributes)))
+        find_ok = len(attributes) >= 1
 
         parent_ok = False
-        for i in range(found.count):
-            attribute = found.item(i)
+        for attribute in attributes:
             try:
                 parent = attribute.parent
                 is_body = isinstance(parent, adsk.fusion.BRepBody)

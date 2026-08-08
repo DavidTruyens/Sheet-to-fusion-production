@@ -323,7 +323,7 @@ git commit -m "feat(core): staleness, resize/move/rotation detection and status 
 - Modify: `SheetVariants/placeholder_cmds.py`
 
 **Interfaces:**
-- Consumes: `placeholder_cmds.find_children`, `_body_vertices`, `read_slot_id` (Plan 1 Tasks 8 and 10); `placeholder_core.{frame_from_matrix, extents_in_frame, occurrence_matrix, matrices_differ, is_axis_aligned, child_status}` (Task 1).
+- Consumes: `placeholder_cmds.{find_children, attribute_list, _body_vertices, read_slot_id}` (Plan 1 Tasks 8 and 10); `placeholder_core.{frame_from_matrix, extents_in_frame, occurrence_matrix, matrices_differ, is_axis_aligned, child_status}` (Task 1).
 - Produces: `placeholder_cmds.survey_children(design) -> list[dict]`, each `{"occurrence", "recipe", "body", "status", "dims_cm", "matrix", "name"}`, sorted by mother name then child name.
 
 - [ ] **Step 1: Add the survey**
@@ -332,12 +332,13 @@ Append to `SheetVariants/placeholder_cmds.py`:
 
 ```python
 def find_slot_bodies(design):
-    """{slot id: body} for every placeholder in ``design``, in one call."""
+    """{slot id: body} for every placeholder in ``design``, in one call.
+
+    Goes through attribute_list() because findAttributes returns an
+    AttributeVector, which has no .count/.item(i) — see Plan 1 Task 10."""
     bodies = {}
-    attributes = design.findAttributes(placeholder_core.ATTR_GROUP,
-                                       placeholder_core.SLOT_ID_ATTR)
-    for i in range(attributes.count):
-        attribute = attributes.item(i)
+    for attribute in attribute_list(design.findAttributes(
+            placeholder_core.ATTR_GROUP, placeholder_core.SLOT_ID_ATTR)):
         try:
             bodies[attribute.value] = attribute.parent
         except Exception:

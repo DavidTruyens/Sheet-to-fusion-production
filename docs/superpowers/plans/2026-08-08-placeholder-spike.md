@@ -38,11 +38,23 @@ Fill this in as you go, then commit it.
 | 3b | Is `base.bodies` populated once downstream features exist? | | |
 | 4 | Is the joint-origin collection spelled `jointOrgins` or `jointOrigins`? | | |
 
-**Fusion API gotcha found while spiking:** `documents.item(i)` returns a **new
-Python wrapper each call**, so `doc_a is doc_b` is never true even for the same
-document. Compare by name or `dataFile.id`. Plan 1 Task 9's `_open_mother()`
-already compares `doc.dataFile.id`, which is correct — but nothing else in either
-plan may use `is` on a Fusion object.
+### Fusion API gotchas found while spiking
+
+Both were caught by a spike rather than by an implementation task, which is the
+point of running them.
+
+1. **`documents.item(i)` returns a new Python wrapper each call**, so `doc_a is
+   doc_b` is never true even for the same document. Compare by name or
+   `dataFile.id`. Plan 1 Task 9's `_open_mother()` already keys on
+   `doc.dataFile.id`, which is correct — nothing else in either plan may use `is`
+   on a Fusion object.
+
+2. **`Design.findAttributes()` returns an `AttributeVector`, not a Fusion
+   collection.** It has no `.count` or `.item(i)`; using them raises
+   `AttributeError: 'AttributeVector' object has no attribute 'count'`. This is
+   the discovery mechanism for *both* commands, and both plans had it wrong.
+   Fixed by `placeholder_cmds.attribute_list()` (Plan 1 Task 10), which both
+   `find_children()` and Plan 2's `find_slot_bodies()` now go through.
 
 ---
 

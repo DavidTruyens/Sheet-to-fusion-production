@@ -2079,6 +2079,7 @@ git commit -m "feat: build child components from mother, config and placeholder 
 - Produces:
   - `build_engine.rebuild_base_feature(component, base, snaps, ops) -> None`
   - `build_engine.find_base_feature(component) -> BaseFeature|None`
+  - `placeholder_cmds.attribute_list(found) -> list[Attribute]` — normalises the `AttributeVector` that `Design.findAttributes()` returns (see the note in the code; it is **not** a Fusion collection)
   - `placeholder_cmds.find_children(design) -> dict[slot_id, (occurrence, recipe)]`
   - `placeholder_cmds.rebuild_child(design, occurrence, recipe, snaps, matrix) -> str`
 
@@ -2141,6 +2142,18 @@ def rebuild_base_feature(component, base, snaps, ops):
 Append to `SheetVariants/placeholder_cmds.py`:
 
 ```python
+def attribute_list(found):
+    """Design.findAttributes() returns an **AttributeVector**, which is NOT a
+    Fusion collection — it has no .count or .item(i), and using them raises
+    AttributeError. Spike 2 confirmed this; len()/index is the working shape.
+    The .count branch is kept as a fallback for builds that expose the collection
+    shape instead."""
+    try:
+        return [found[i] for i in range(len(found))]
+    except (TypeError, AttributeError):
+        return [found.item(i) for i in range(found.count)]
+
+
 def find_children(design):
     """{slot id: (occurrence, recipe)} for every child in ``design``.
 
@@ -2149,13 +2162,11 @@ def find_children(design):
     by matching component names against the root's occurrences.
     """
     found = {}
-    attributes = design.findAttributes(placeholder_core.ATTR_GROUP,
-                                       placeholder_core.CHILD_RECIPE_ATTR)
     by_component = {}
     for occurrence in design.rootComponent.occurrences:
         by_component.setdefault(occurrence.component.name, occurrence)
-    for i in range(attributes.count):
-        attribute = attributes.item(i)
+    for attribute in attribute_list(design.findAttributes(
+            placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR)):
         recipe = placeholder_core.loads_attr(attribute.value,
                                              placeholder_core.migrate_child_recipe)
         try:
