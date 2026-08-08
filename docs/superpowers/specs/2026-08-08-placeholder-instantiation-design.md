@@ -65,7 +65,7 @@ top.
 | What happens to a filled placeholder | Hidden (`isLightBulbOn = False`), never deleted — roll back past the children to see the conceptual layout |
 | Child ↔ box relationship | **Transform only, no joint.** Update reconciles move and resize together |
 | Where the placement lives | The **occurrence transform**; bodies are stored in the child's local (anchor) space |
-| How edits survive a rebuild | `BaseFeature.updateBody()` **in place**, so the designer's downstream features recompute. No freeze flag |
+| How edits survive a rebuild | `BaseFeature.updateBody()` **in place**, so the designer's downstream features recompute. No freeze flag. **Verified constraint:** only features that do not reference the generated topology survive — see "What survives, measured" |
 | Update trigger | One `Update Children` dialog, showing each mother's stored vs current version |
 
 ### Rejected alternatives
@@ -357,10 +357,30 @@ baseFeature.startEdit()
 baseFeature.finishEdit()          ← Fusion recomputes the designer's features here
 ```
 
-`updateBody()` preserves body identity, which gives downstream features their best
-chance of keeping their references. When a topology change does break one, Fusion
-marks that feature as errored — visible, recoverable, and the expected outcome
-rather than a bug.
+### What survives, measured
+
+Spike 3 tested this rather than assuming it. The results are not uniform, and the
+difference is the single most important thing a user of this feature must know:
+
+| Downstream feature | Result |
+|--------------------|--------|
+| **Topology-independent** — a cut from a sketch on an **origin plane** | **Survives cleanly.** Health `healthy`, and the cut is re-applied to the *new* geometry at full depth: a 10×10×10 box swapped for 16×12×10 came back at 1794.336 cm³, i.e. 1920 minus the ø4×10 hole's 125.664 exactly |
+| **Topology-referencing** — a fillet on a specific **edge** | **Destroyed.** `updateBody()` returns `True`, then `finishEdit()` raises `InternalValidationError`, the feature count drops to 0, and the body is left unreadable (`Bad index parameter`) |
+
+So the honest promise is **not** "your edits survive a rebuild". It is:
+
+> Downstream features survive a rebuild when they do **not** reference the
+> generated geometry's topology. Anchor cuts to origin planes and construction
+> geometry, not to a generated face or edge.
+
+An earlier draft of this spec claimed a broken reference would leave the feature
+"errored — visible, recoverable". That was wrong: Fusion **throws** and the feature
+is **gone**. `rebuild_base_feature()` must therefore treat `finishEdit()` as a
+call that can raise, catch it, and report that child as failed rather than letting
+one fragile fillet abort a whole run.
+
+`updateBody()` does preserve body identity, which is what gives the
+topology-independent case its clean survival.
 
 Body references go stale after `finishEdit()`, so materials and appearances are
 reapplied by index afterwards, exactly as the existing code documents at
@@ -382,6 +402,7 @@ All are **reported per child** and skip only that child; none abort the run.
 | Config row no longer in the sheet | Error naming the config |
 | Placeholder body deleted | "placeholder missing"; the child is left untouched |
 | Child's base feature deleted | "cannot rebuild"; skipped |
+| `finishEdit()` raises because a downstream feature referenced the old topology | Caught; that child reported as "rebuild failed — a feature built on the old geometry could not be recomputed"; the run continues |
 | A horizontal face picked as "front" | Rejected at selection time with an explanation |
 | Sheet unreachable | Existing `fetch_rows` error handling and sharing help |
 
