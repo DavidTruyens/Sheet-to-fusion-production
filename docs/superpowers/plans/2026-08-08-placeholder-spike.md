@@ -35,10 +35,15 @@ Fill this in as you go, then commit it.
 | 1b | Does `app.data.findFileById()` resolve? | **PASS** | Resolved `"spike1" v1`. Plan 1 Task 9 `_open_mother()` is viable. (`app.data.activeProject` throws `InternalValidationError` on this setup — avoid it) |
 | 2 | Do `BRepBody` attributes survive recompute, rollback, and save/reopen? | **PASS** | After parameter change + rollback + save + close + reopen: direct read returned `slot-deadbeef`, `findAttributes` count 1, `parent=Body1 isBody=True`. Slot identity is sound — no fallback to body names needed |
 | 2b | How is `findAttributes()`' result accessed? | **`len`/index** | It returns an `AttributeVector`, **not** a Fusion collection. `attribute_list()` tries this shape first, so both plans are correct |
-| 3 | Does `BaseFeature.updateBody()` preserve downstream features? | | |
+| 3 | Does `BaseFeature.updateBody()` preserve downstream features? | **PASS, with a constraint** | **Topology-independent** (cut from an origin-plane sketch): survives cleanly, health `healthy`, re-applied to the new geometry at full depth — 1794.336 cm³ = 1920 − ø4×10 hole (125.664), exact. **Topology-referencing** (fillet on an edge): `updateBody` returns True, then `finishEdit()` **raises** `InternalValidationError`, feature count 1 → 0, body unreadable. Spec's "errored but recoverable" wording was wrong and has been corrected |
 | 3b | Is `base.bodies` populated once downstream features exist? | **YES** | Count 1 with a fillet on top. `base_feature_bodies()` uses it; the positional fallback is a safety net, not the path |
-| 3c | Where must the body passed to `updateBody()` come from? | | Fetching it **inside** the edit died with `RuntimeError: 3 : Bad index parameter` — `startEdit()` rolls the timeline and invalidates. Re-run tests capture-before vs fetch-inside |
-| 4 | Is the joint-origin collection spelled `jointOrgins` or `jointOrigins`? | | |
+| 3c | Where must the body passed to `updateBody()` come from? | **`base.bodies`, INSIDE the edit** | Documented dual behaviour confirmed: outside the edit `bodies` is the filleted **result** (997.9), inside it is the **source** (1000.0). `adsk.doEvents()` after `startEdit()` is NOT required — both controls passed without it |
+| 4 | Is the joint-origin collection spelled `jointOrgins` or `jointOrigins`? | **BOTH exist** | Autodesk added the correct spelling and kept the typo. Use `jointOrgins` — older builds have only that one |
+| 4b | Is the anchor readable, and does it move, after a recompute? | **PASS** | Anchor on the top face of a 10×8 box: `(5, 4, 5)` → drive height to 12 cm → `(5, 4, 12)`, exact. Restoring the parameter returned it to `(5, 4, 5)`. `_snapshot_for()` can safely read the anchor after driving the mother, and a run's parameter restore leaves it where it started |
+
+**ALL FOUR SPIKES PASS.** Plan 1 Tasks 6–11 are unblocked. The one carried
+constraint is spike 3's: only downstream features that do not reference the
+generated topology survive a rebuild.
 
 ### Fusion API gotchas found while spiking
 
