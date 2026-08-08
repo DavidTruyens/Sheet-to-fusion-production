@@ -39,7 +39,11 @@ Fill this in as you go, then commit it.
 | 3b | Is `base.bodies` populated once downstream features exist? | **YES** | Count 1 with a fillet on top. `base_feature_bodies()` uses it; the positional fallback is a safety net, not the path |
 | 3c | Where must the body passed to `updateBody()` come from? | **`base.bodies`, INSIDE the edit** | Documented dual behaviour confirmed: outside the edit `bodies` is the filleted **result** (997.9), inside it is the **source** (1000.0). `adsk.doEvents()` after `startEdit()` is NOT required — both controls passed without it |
 | 4 | Is the joint-origin collection spelled `jointOrgins` or `jointOrigins`? | **BOTH exist** | Autodesk added the correct spelling and kept the typo. Use `jointOrgins` — older builds have only that one |
-| 4b | Is the anchor readable, and does it move, after a recompute? | | First run had 0 joint origins so this never ran. Script rewritten to build its own parameter-driven scenario — **re-run pending** |
+| 4b | Is the anchor readable, and does it move, after a recompute? | **PASS** | Anchor on the top face of a 10×8 box: `(5, 4, 5)` → drive height to 12 cm → `(5, 4, 12)`, exact. Restoring the parameter returned it to `(5, 4, 5)`. `_snapshot_for()` can safely read the anchor after driving the mother, and a run's parameter restore leaves it where it started |
+
+**ALL FOUR SPIKES PASS.** Plan 1 Tasks 6–11 are unblocked. The one carried
+constraint is spike 3's: only downstream features that do not reference the
+generated topology survive a rebuild.
 
 ### Fusion API gotchas found while spiking
 
