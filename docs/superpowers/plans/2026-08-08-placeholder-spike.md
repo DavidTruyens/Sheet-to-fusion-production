@@ -31,11 +31,18 @@ Fill this in as you go, then commit it.
 
 | # | Question | Answer | Notes |
 |---|----------|--------|-------|
-| 1 | Do `TemporaryBRepManager` bodies survive activating and closing a *different* document, and still insert? | | |
+| 1 | Do `TemporaryBRepManager` bodies survive activating and closing a *different* document, and still insert? | **PASS** | Volume 600.0 unchanged; inserted into a fresh document as 1 body. Fusion Personal, macOS. First run only exercised the scratch-document leg — the "activate a real second design" leg was skipped by a bug (identity comparison on API wrappers); **re-run pending** to confirm the stronger leg |
+| 1b | Does `app.data.findFileById()` resolve? | **PASS** | Resolved `"spike1" v1`. Plan 1 Task 9 `_open_mother()` is viable. (`app.data.activeProject` throws `InternalValidationError` on this setup — avoid it) |
 | 2 | Do `BRepBody` attributes survive recompute, rollback, and save/reopen? | | |
 | 3 | Does `BaseFeature.updateBody()` preserve downstream features? | | |
 | 3b | Is `base.bodies` populated once downstream features exist? | | |
 | 4 | Is the joint-origin collection spelled `jointOrgins` or `jointOrigins`? | | |
+
+**Fusion API gotcha found while spiking:** `documents.item(i)` returns a **new
+Python wrapper each call**, so `doc_a is doc_b` is never true even for the same
+document. Compare by name or `dataFile.id`. Plan 1 Task 9's `_open_mother()`
+already compares `doc.dataFile.id`, which is correct — but nothing else in either
+plan may use `is` on a Fusion object.
 
 ---
 

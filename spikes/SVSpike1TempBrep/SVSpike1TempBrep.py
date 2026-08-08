@@ -80,13 +80,17 @@ def run(context):
 
         # --- activate a real second design, if one is open --------------------
         notes.append('--- document switching ---')
+        # Compare by NAME, not identity: the Fusion API returns a fresh Python
+        # wrapper on every documents.item(i) call, so `candidate is not source_doc`
+        # is always True and would "find" the active document as the other one.
         other = None
         for i in range(app.documents.count):
             candidate = app.documents.item(i)
-            if candidate is not source_doc:
+            if candidate.name != source_doc.name:
                 other = candidate
                 break
         if other:
+            notes.append('source is  "{}"'.format(source_doc.name))
             notes.append('activating "{}"'.format(other.name))
             other.activate()
             adsk.doEvents()
