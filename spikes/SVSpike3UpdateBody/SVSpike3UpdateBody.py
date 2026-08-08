@@ -29,6 +29,20 @@ import adsk.fusion
 app = adsk.core.Application.get()
 
 
+def _seq(collection):
+    """Fusion returns TWO shapes and mixes them on the same object.
+
+    Real collections have .count / .item(i) — base.bodies is one. The *Vector
+    types are Python sequences with neither: AttributeVector (spike 2) and
+    BRepBodyVector (base.sourceBodies) both raise AttributeError on .count.
+    Normalise both so callers stop having to guess.
+    """
+    try:
+        return [collection.item(i) for i in range(collection.count)]
+    except AttributeError:
+        return [collection[i] for i in range(len(collection))]
+
+
 def _health(feature):
     try:
         state = feature.healthState
@@ -91,9 +105,9 @@ def _dump(base, when):
             lines.append('    {}: NOT PRESENT on this API version'.format(attr))
             continue
         try:
-            collection = getattr(base, attr)
-            names = [collection.item(i).name for i in range(collection.count)]
-            lines.append('    {}: count={} {}'.format(attr, collection.count, names))
+            items = _seq(getattr(base, attr))
+            lines.append('    {}: count={} {}'
+                         .format(attr, len(items), [b.name for b in items]))
         except Exception as err:
             lines.append('    {}: unreadable — {}'.format(attr, err))
     return lines
@@ -164,18 +178,20 @@ def run(context):
     try:
         tbm = adsk.fusion.TemporaryBRepManager.get()
 
+        def source(base, want_inside, inside):
+            if inside != want_inside:
+                return None
+            items = _seq(base.sourceBodies)
+            return items[0] if items else None
+
         attempts = [
-            ('sourceBodies, fetched INSIDE the edit',
-             lambda base, inside: (base.sourceBodies.item(0)
-                                   if inside and hasattr(base, 'sourceBodies')
-                                   and base.sourceBodies.count else None)),
             ('sourceBodies, captured BEFORE the edit',
-             lambda base, inside: (base.sourceBodies.item(0)
-                                   if not inside and hasattr(base, 'sourceBodies')
-                                   and base.sourceBodies.count else None)),
+             lambda base, inside: source(base, False, inside)),
+            ('sourceBodies, fetched INSIDE the edit',
+             lambda base, inside: source(base, True, inside)),
             ('bodies, fetched INSIDE the edit',
-             lambda base, inside: (base.bodies.item(0)
-                                   if inside and base.bodies.count else None)),
+             lambda base, inside: (_seq(base.bodies)[0]
+                                   if inside and _seq(base.bodies) else None)),
         ]
 
         winner = None
