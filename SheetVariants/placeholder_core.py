@@ -7,6 +7,7 @@
 # Google Sheets, this one is about geometry and stored schemas.
 
 import json
+import math
 import uuid
 
 ATTR_GROUP = "SheetVariants"
@@ -126,3 +127,58 @@ def migrate_child_recipe(data):
         dims_cm=(_float(dims.get("w")), _float(dims.get("d")), _float(dims.get("h"))),
         bodies=bodies,
         built_at=data.get("builtAt"))
+
+
+UP = (0.0, 0.0, 1.0)
+
+_AXIS_VECTORS = {"+X": (1.0, 0.0, 0.0), "-X": (-1.0, 0.0, 0.0),
+                 "+Y": (0.0, 1.0, 0.0), "-Y": (0.0, -1.0, 0.0)}
+
+# A face normal from real geometry is never exactly horizontal, so the "is this
+# face vertical?" test needs slack. 1e-4 accepts ordinary floating-point noise
+# while still rejecting a face tilted by even a hundredth of a degree.
+_HORIZONTAL_TOLERANCE = 1e-4
+
+
+def dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def normalize(v):
+    length = math.sqrt(dot(v, v))
+    if length < 1e-12:
+        raise ValueError("Could not read a direction from that face.")
+    return (v[0] / length, v[1] / length, v[2] / length)
+
+
+def _frame_from_outward(outward):
+    """(width, depth, up) unit axes for a frame whose front points along
+    ``outward``. Depth runs INTO the volume, opposite the outward direction; up is
+    world +Z; width is depth x up, making the frame right-handed (w x d == u)."""
+    n = normalize(outward)
+    if abs(n[2]) > _HORIZONTAL_TOLERANCE:
+        raise ValueError(
+            "The front face must be vertical — pick a side of the box, not its "
+            "top or bottom.")
+    depth = (-n[0], -n[1], -n[2])
+    return (cross(depth, UP), depth, UP)
+
+
+def target_frame(face_normal):
+    """The layout-side frame implied by the selected front face's outward normal."""
+    return _frame_from_outward(face_normal)
+
+
+def mother_frame(front_axis):
+    """The mother-side frame implied by its stored front axis, which points out of
+    the front exactly as a face normal does."""
+    if front_axis not in _AXIS_VECTORS:
+        raise ValueError(
+            "The mother's front axis must be one of {}.".format(", ".join(FRONT_AXES)))
+    return _frame_from_outward(_AXIS_VECTORS[front_axis])

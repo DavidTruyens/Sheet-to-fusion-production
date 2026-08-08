@@ -1,3 +1,4 @@
+import math
 import pytest
 import placeholder_core as pc
 
@@ -101,3 +102,59 @@ def test_migrate_child_recipe_handles_garbage():
 def test_migrate_child_recipe_coerces_dims_to_float():
     r = pc.migrate_child_recipe({"dims_cm": {"w": "60", "d": 58, "h": 72.5}})
     assert r["dims_cm"] == {"w": 60.0, "d": 58.0, "h": 72.5}
+
+
+def _close(a, b, tol=1e-9):
+    return all(abs(x - y) < tol for x, y in zip(a, b))
+
+
+def test_target_frame_for_a_face_pointing_minus_y():
+    w, d, u = pc.target_frame((0.0, -1.0, 0.0))
+    assert _close(d, (0.0, 1.0, 0.0))     # depth runs INTO the box
+    assert _close(u, (0.0, 0.0, 1.0))
+    assert _close(w, (1.0, 0.0, 0.0))
+
+
+def test_target_frame_is_right_handed():
+    w, d, u = pc.target_frame((0.0, -1.0, 0.0))
+    assert _close(pc.cross(w, d), u)
+
+
+def test_target_frame_for_a_rotated_face():
+    n = (math.sqrt(0.5), -math.sqrt(0.5), 0.0)
+    w, d, u = pc.target_frame(n)
+    assert _close(d, (-n[0], -n[1], 0.0))
+    assert _close(pc.cross(w, d), u)
+    assert abs(pc.dot(w, d)) < 1e-9
+
+
+def test_target_frame_normalizes_a_long_normal():
+    w, d, u = pc.target_frame((0.0, -7.0, 0.0))
+    assert _close(d, (0.0, 1.0, 0.0))
+
+
+def test_target_frame_rejects_a_horizontal_face():
+    with pytest.raises(ValueError) as e:
+        pc.target_frame((0.0, 0.0, 1.0))
+    assert "vertical" in str(e.value)
+
+
+def test_target_frame_rejects_a_zero_normal():
+    with pytest.raises(ValueError):
+        pc.target_frame((0.0, 0.0, 0.0))
+
+
+def test_mother_frame_minus_y_matches_a_minus_y_face():
+    assert pc.mother_frame("-Y") == pc.target_frame((0.0, -1.0, 0.0))
+
+
+def test_mother_frame_plus_x():
+    w, d, u = pc.mother_frame("+X")
+    assert _close(d, (-1.0, 0.0, 0.0))
+    assert _close(pc.cross(w, d), u)
+
+
+def test_mother_frame_rejects_a_vertical_axis():
+    with pytest.raises(ValueError) as e:
+        pc.mother_frame("+Z")
+    assert "+X" in str(e.value)
