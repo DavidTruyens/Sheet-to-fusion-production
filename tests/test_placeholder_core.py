@@ -104,6 +104,57 @@ def test_migrate_child_recipe_coerces_dims_to_float():
     assert r["dims_cm"] == {"w": 60.0, "d": 58.0, "h": 72.5}
 
 
+def test_new_child_recipe_coerces_a_string_version_to_none():
+    r = pc.new_child_recipe(
+        slot_id="s", mother={"fileId": "x", "name": "n", "version": "12"},
+        config="c", sheet_url="u", tab="t", dims_cm=(1, 2, 3), bodies=[],
+        built_at="")
+    assert r["mother"]["version"] is None
+
+
+def test_new_child_recipe_coerces_a_bool_version_to_none():
+    r = pc.new_child_recipe(
+        slot_id="s", mother={"fileId": "x", "name": "n", "version": True},
+        config="c", sheet_url="u", tab="t", dims_cm=(1, 2, 3), bodies=[],
+        built_at="")
+    assert r["mother"]["version"] is None
+
+
+def test_new_child_recipe_keeps_a_real_int_version():
+    r = pc.new_child_recipe(
+        slot_id="s", mother={"fileId": "x", "name": "n", "version": 12},
+        config="c", sheet_url="u", tab="t", dims_cm=(1, 2, 3), bodies=[],
+        built_at="")
+    assert r["mother"]["version"] == 12
+
+
+def test_migrate_child_recipe_coerces_a_string_version_to_none():
+    r = pc.migrate_child_recipe({"mother": {"version": "12"}})
+    assert r["mother"]["version"] is None
+
+
+def test_migrate_child_recipe_coerces_a_bool_version_to_none():
+    r = pc.migrate_child_recipe({"mother": {"version": True}})
+    assert r["mother"]["version"] is None
+
+
+def test_migrate_child_recipe_keeps_a_real_int_version():
+    r = pc.migrate_child_recipe({"mother": {"version": 12}})
+    assert r["mother"]["version"] == 12
+
+
+def test_string_version_round_trips_to_none_through_the_attribute():
+    # A future caller handing a non-int version must not produce a recipe that
+    # silently fails to round-trip: written and re-read versions must agree.
+    r = pc.new_child_recipe(
+        slot_id="s", mother={"fileId": "x", "name": "n", "version": "12"},
+        config="c", sheet_url="u", tab="t", dims_cm=(1, 2, 3), bodies=[],
+        built_at="")
+    reloaded = pc.loads_attr(pc.dumps_attr(r), pc.migrate_child_recipe)
+    assert reloaded == r
+    assert reloaded["mother"]["version"] is None
+
+
 def _close(a, b, tol=1e-9):
     return all(abs(x - y) < tol for x, y in zip(a, b))
 
@@ -133,10 +184,32 @@ def test_target_frame_normalizes_a_long_normal():
     assert _close(d, (0.0, 1.0, 0.0))
 
 
+def test_target_frame_flattens_an_accepted_tilt_to_orthonormal():
+    # A normal tilted just under the tolerance is accepted, but must not carry
+    # its tilt into the frame: w, d, u must stay mutually orthogonal and unit
+    # length, or local_matrix's transpose-as-inverse shortcut silently drifts.
+    w, d, u = pc.target_frame((0.0, -1.0, 5e-5))
+    assert abs(pc.dot(w, d)) < 1e-9
+    assert abs(pc.dot(d, u)) < 1e-9
+    assert abs(pc.dot(w, u)) < 1e-9
+    assert abs(math.sqrt(pc.dot(w, w)) - 1.0) < 1e-9
+    assert abs(math.sqrt(pc.dot(d, d)) - 1.0) < 1e-9
+    assert abs(math.sqrt(pc.dot(u, u)) - 1.0) < 1e-9
+
+
 def test_target_frame_rejects_a_horizontal_face():
     with pytest.raises(ValueError) as e:
         pc.target_frame((0.0, 0.0, 1.0))
     assert "vertical" in str(e.value)
+
+
+def test_target_frame_tolerance_boundary_is_pinned():
+    # Pins _HORIZONTAL_TOLERANCE itself: 0.0 would reject every real face (which
+    # is never exactly vertical) and 0.5 would accept faces that are nowhere
+    # near vertical. Neither extreme is caught by any other test.
+    pc.target_frame((0.0, -1.0, 5e-5))
+    with pytest.raises(ValueError):
+        pc.target_frame((0.0, -1.0, 1e-3))
 
 
 def test_target_frame_rejects_a_zero_normal():
@@ -193,9 +266,47 @@ def test_extents_of_a_rotated_box_are_not_inflated():
     assert _close(centre, (0.0, 0.0, 36.0), 1e-9)
 
 
+def test_extents_of_a_rotated_box_translated_off_origin():
+    # Same rotated box as above, but shifted +100 in X so mid[0] and mid[1] are
+    # both nonzero. That is what distinguishes a correct centre reconstruction
+    # (sum(mid[i] * axes[i][k])) from the transposed mutant (axes[k][i]): the two
+    # agree whenever the frame is identity or the midpoint is at the origin, and
+    # disagree only here.
+    import math as m
+    c = m.cos(m.pi / 4)
+    frame = pc.target_frame((c, -c, 0.0))
+    verts = []
+    for lx, ly, lz in _box_vertices(-30, -29, 0, 30, 29, 72):
+        verts.append((lx * c - ly * c + 100.0, lx * c + ly * c, lz))
+    w, d, h, centre = pc.extents_in_frame(verts, frame)
+    assert abs(w - 60.0) < 1e-9
+    assert abs(d - 58.0) < 1e-9
+    assert abs(h - 72.0) < 1e-9
+    assert _close(centre, (100.0, 0.0, 36.0), 1e-9)
+
+
 def test_extents_rejects_an_empty_vertex_list():
     with pytest.raises(ValueError):
         pc.extents_in_frame([], pc.target_frame((0.0, -1.0, 0.0)))
+
+
+def test_extents_rejects_a_single_vertex():
+    # A single vertex has zero extent on all three axes. Left unchecked this
+    # returns (0, 0, 0, that point) and downstream becomes a baffling
+    # "0.000000 cm" parameter, attributed to the user's box rather than to a
+    # degenerate selection.
+    frame = pc.target_frame((0.0, -1.0, 0.0))
+    with pytest.raises(ValueError):
+        pc.extents_in_frame([(1.0, 2.0, 3.0)], frame)
+
+
+def test_extents_rejects_a_zero_thickness_box():
+    # A real box collapsed flat on one axis (e.g. depth == 0) is just as
+    # degenerate as a single point and must be rejected the same way.
+    frame = pc.target_frame((0.0, -1.0, 0.0))
+    flat = _box_vertices(0, 0, 0, 60, 0, 72)
+    with pytest.raises(ValueError):
+        pc.extents_in_frame(flat, frame)
 
 
 def test_occurrence_matrix_places_the_origin_at_the_centre():

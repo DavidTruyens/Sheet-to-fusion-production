@@ -81,6 +81,19 @@ def _float(value, fallback=0.0):
         return fallback
 
 
+def _version(value):
+    """Normalise a stored mother version: a real int, or None.
+
+    ``bool`` is excluded even though it subclasses ``int`` — a stored
+    ``true``/``false`` is not a version number, and letting it through would
+    make a later staleness comparison behave unpredictably. Used by both
+    ``new_child_recipe`` and ``migrate_child_recipe`` so a string or float
+    version normalises to None the same way on write as on read, instead of
+    only being caught on the next migration and silently failing to round-trip
+    until then."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def new_child_recipe(slot_id, mother, config, sheet_url, tab, dims_cm,
                      bodies, built_at):
     """The record a child carries so it can be rebuilt later.
@@ -95,7 +108,7 @@ def new_child_recipe(slot_id, mother, config, sheet_url, tab, dims_cm,
         "slotId": str(slot_id or ""),
         "mother": {"fileId": str(mother.get("fileId") or ""),
                    "name": str(mother.get("name") or ""),
-                   "version": mother.get("version")},
+                   "version": _version(mother.get("version"))},
         "config": str(config or ""),
         "sheetUrl": str(sheet_url or ""),
         "tab": str(tab or ""),
@@ -114,13 +127,10 @@ def migrate_child_recipe(data):
     dims = dims if isinstance(dims, dict) else {}
     bodies = data.get("bodies")
     bodies = bodies if isinstance(bodies, list) else []
-    version = mother.get("version")
-    if not isinstance(version, int):
-        version = None
     return new_child_recipe(
         slot_id=data.get("slotId"),
         mother={"fileId": mother.get("fileId"), "name": mother.get("name"),
-                "version": version},
+                "version": _version(mother.get("version"))},
         config=data.get("config"),
         sheet_url=data.get("sheetUrl"),
         tab=data.get("tab"),
@@ -138,6 +148,10 @@ _AXIS_VECTORS = {"+X": (1.0, 0.0, 0.0), "-X": (-1.0, 0.0, 0.0),
 # face vertical?" test needs slack. 1e-4 accepts ordinary floating-point noise
 # while still rejecting a face tilted by even a hundredth of a degree.
 _HORIZONTAL_TOLERANCE = 1e-4
+
+# Below this, an extent is floating-point noise around zero rather than a real
+# dimension — well under any placeholder anyone would build, in cm.
+_MIN_EXTENT_CM = 1e-6
 
 
 def dot(a, b):
@@ -166,7 +180,13 @@ def _frame_from_outward(outward):
         raise ValueError(
             "The front face must be vertical — pick a side of the box, not its "
             "top or bottom.")
-    depth = (-n[0], -n[1], -n[2])
+    # A real face normal that survives the check above is still tilted by up to
+    # _HORIZONTAL_TOLERANCE, not exactly horizontal. Flattening it onto the z=0
+    # plane before building the frame keeps (w, d, u) exactly orthonormal, which
+    # local_matrix's docstring relies on to use a transpose instead of a general
+    # inverse; left tilted, a 60x58x210 box measures depth 58.021 instead of 58.
+    n = normalize((n[0], n[1], 0.0))
+    depth = (-n[0], -n[1], 0.0)
     return (cross(depth, UP), depth, UP)
 
 
@@ -202,9 +222,14 @@ def extents_in_frame(vertices, frame):
     projected = [tuple(dot(v, axis) for axis in axes) for v in vertices]
     lo = [min(p[i] for p in projected) for i in range(3)]
     hi = [max(p[i] for p in projected) for i in range(3)]
+    extents = [hi[i] - lo[i] for i in range(3)]
+    if any(e < _MIN_EXTENT_CM for e in extents):
+        raise ValueError(
+            "The placeholder is flat or degenerate along one axis — pick a box "
+            "with real width, depth and height.")
     mid = [(lo[i] + hi[i]) / 2.0 for i in range(3)]
     centre = tuple(sum(mid[i] * axes[i][k] for i in range(3)) for k in range(3))
-    return (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], centre)
+    return (extents[0], extents[1], extents[2], centre)
 
 
 def occurrence_matrix(centre, frame):
