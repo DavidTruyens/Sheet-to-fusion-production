@@ -1,0 +1,10 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "script",
+    "author": "David Truyens",
+    "description": {
+        "": "Placeholder-instantiation spike: see docs/superpowers/plans/2026-08-08-placeholder-spike.md"
+    },
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}
