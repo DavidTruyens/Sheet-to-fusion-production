@@ -233,3 +233,48 @@ def local_matrix(anchor, frame):
             d[0], d[1], d[2], -dot(d, anchor),
             u[0], u[1], u[2], -dot(u, anchor),
             0.0, 0.0, 0.0, 1.0]
+
+
+def qualified_body_name(component_name, body_name):
+    """A body's name qualified by its owning component, so two components can both
+    hold a body called 'Side' without the two being confused during a rebuild."""
+    return "{}::{}".format(component_name or "", body_name or "")
+
+
+def _ordinal_keys(names):
+    """Pair each name with how many times it has already been seen, so repeated
+    names still match one-to-one rather than all collapsing onto the first."""
+    seen, keys = {}, []
+    for name in names:
+        index = seen.get(name, 0)
+        seen[name] = index + 1
+        keys.append((name, index))
+    return keys
+
+
+def pair_bodies(old_names, new_names):
+    """Ops that turn a base feature holding ``old_names`` into one holding
+    ``new_names``, matched by qualified name.
+
+    Matching by name rather than by position is what lets a config change alter
+    the body count — a two-drawer front becoming three — without scrambling which
+    body is replaced by which.
+
+    Ops are returned update-first, then adds, then removes, so a caller can apply
+    them in order: every deletion happens after every op that still needs to read
+    the old bodies.
+    """
+    old_keys = _ordinal_keys(old_names or [])
+    new_keys = _ordinal_keys(new_names or [])
+    new_positions = {key: i for i, key in enumerate(new_keys)}
+
+    updates, removes, matched = [], [], set()
+    for old_index, key in enumerate(old_keys):
+        new_index = new_positions.get(key)
+        if new_index is None:
+            removes.append(("remove", old_index, None))
+        else:
+            updates.append(("update", old_index, new_index))
+            matched.add(new_index)
+    adds = [("add", None, i) for i in range(len(new_keys)) if i not in matched]
+    return updates + adds + removes

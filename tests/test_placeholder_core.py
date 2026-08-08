@@ -235,3 +235,49 @@ def test_local_matrix_is_the_inverse_of_the_mother_frame():
     w, d, u = frame
     ahead = tuple(anchor[i] + d[i] for i in range(3))
     assert _close(apply(m, ahead), (0.0, 1.0, 0.0), 1e-9)
+
+
+def test_qualified_body_name():
+    assert pc.qualified_body_name("Carcass", "Left side") == "Carcass::Left side"
+
+
+def test_pair_bodies_identical_lists_are_all_updates():
+    ops = pc.pair_bodies(["A", "B"], ["A", "B"])
+    assert ops == [("update", 0, 0), ("update", 1, 1)]
+
+
+def test_pair_bodies_reordered_lists_track_by_name():
+    ops = pc.pair_bodies(["A", "B"], ["B", "A"])
+    assert ops == [("update", 0, 1), ("update", 1, 0)]
+
+
+def test_pair_bodies_added_body():
+    ops = pc.pair_bodies(["A"], ["A", "B"])
+    assert ops == [("update", 0, 0), ("add", None, 1)]
+
+
+def test_pair_bodies_removed_body():
+    ops = pc.pair_bodies(["A", "B"], ["A"])
+    assert ops == [("update", 0, 0), ("remove", 1, None)]
+
+
+def test_pair_bodies_orders_updates_then_adds_then_removes():
+    ops = pc.pair_bodies(["A", "X"], ["A", "B"])
+    assert [o[0] for o in ops] == ["update", "add", "remove"]
+
+
+def test_pair_bodies_duplicate_names_pair_by_ordinal():
+    ops = pc.pair_bodies(["A", "A", "A"], ["A", "A"])
+    assert ops == [("update", 0, 0), ("update", 1, 1), ("remove", 2, None)]
+
+
+def test_pair_bodies_from_empty_is_all_adds():
+    assert pc.pair_bodies([], ["A", "B"]) == [("add", None, 0), ("add", None, 1)]
+
+
+def test_pair_bodies_to_empty_is_all_removes():
+    assert pc.pair_bodies(["A", "B"], []) == [("remove", 0, None), ("remove", 1, None)]
+
+
+def test_pair_bodies_handles_none():
+    assert pc.pair_bodies(None, None) == []
