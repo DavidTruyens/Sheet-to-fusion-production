@@ -7,6 +7,7 @@
 # Google Sheets, this one is about geometry and stored schemas.
 
 import json
+import uuid
 
 ATTR_GROUP = "SheetVariants"
 MOTHER_SETUP_ATTR = "motherSetup"
@@ -64,3 +65,64 @@ def validate_mother_setup(data):
         if not setup["params"][key]:
             errors.append('No parameter is mapped to {}.'.format(key))
     return errors
+
+
+def new_slot_id():
+    """A stable identity for a placeholder box, stamped on the body itself so it
+    survives renaming the body — which a name-based key would not."""
+    return "slot-" + uuid.uuid4().hex[:8]
+
+
+def _float(value, fallback=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def new_child_recipe(slot_id, mother, config, sheet_url, tab, dims_cm,
+                     bodies, built_at):
+    """The record a child carries so it can be rebuilt later.
+
+    ``built_at`` is supplied by the caller rather than generated here, so this
+    module stays free of wall-clock dependencies and its tests stay deterministic.
+    """
+    mother = mother if isinstance(mother, dict) else {}
+    w, d, h = dims_cm
+    return {
+        "v": 1,
+        "slotId": str(slot_id or ""),
+        "mother": {"fileId": str(mother.get("fileId") or ""),
+                   "name": str(mother.get("name") or ""),
+                   "version": mother.get("version")},
+        "config": str(config or ""),
+        "sheetUrl": str(sheet_url or ""),
+        "tab": str(tab or ""),
+        "dims_cm": {"w": _float(w), "d": _float(d), "h": _float(h)},
+        "bodies": [str(b) for b in (bodies or [])],
+        "builtAt": str(built_at or ""),
+    }
+
+
+def migrate_child_recipe(data):
+    """Return a well-formed childRecipe from whatever was stored."""
+    data = data if isinstance(data, dict) else {}
+    mother = data.get("mother")
+    mother = mother if isinstance(mother, dict) else {}
+    dims = data.get("dims_cm")
+    dims = dims if isinstance(dims, dict) else {}
+    bodies = data.get("bodies")
+    bodies = bodies if isinstance(bodies, list) else []
+    version = mother.get("version")
+    if not isinstance(version, int):
+        version = None
+    return new_child_recipe(
+        slot_id=data.get("slotId"),
+        mother={"fileId": mother.get("fileId"), "name": mother.get("name"),
+                "version": version},
+        config=data.get("config"),
+        sheet_url=data.get("sheetUrl"),
+        tab=data.get("tab"),
+        dims_cm=(_float(dims.get("w")), _float(dims.get("d")), _float(dims.get("h"))),
+        bodies=bodies,
+        built_at=data.get("builtAt"))

@@ -50,3 +50,54 @@ def test_attr_round_trip():
 def test_loads_attr_survives_corrupt_json():
     assert pc.loads_attr("{not json", pc.migrate_mother_setup)["v"] == 1
     assert pc.loads_attr(None, pc.migrate_mother_setup)["v"] == 1
+
+
+def test_new_slot_id_is_prefixed_and_unique():
+    a, b = pc.new_slot_id(), pc.new_slot_id()
+    assert a.startswith("slot-") and b.startswith("slot-")
+    assert a != b
+
+
+def _recipe():
+    return pc.new_child_recipe(
+        slot_id="slot-abc",
+        mother={"fileId": "urn:x", "name": "base-cabinet.f3d", "version": 12},
+        config="Base_2drawer",
+        sheet_url="https://sheet", tab="Cabinets",
+        dims_cm=(60.0, 58.0, 72.0),
+        bodies=["Carcass::Left", "Carcass::Right"],
+        built_at="2026-08-08T14:22:00")
+
+
+def test_new_child_recipe_shape():
+    r = _recipe()
+    assert r["v"] == 1
+    assert r["slotId"] == "slot-abc"
+    assert r["mother"]["version"] == 12
+    assert r["dims_cm"] == {"w": 60.0, "d": 58.0, "h": 72.0}
+    assert r["bodies"] == ["Carcass::Left", "Carcass::Right"]
+
+
+def test_child_recipe_round_trips_through_attribute():
+    r = _recipe()
+    assert pc.loads_attr(pc.dumps_attr(r), pc.migrate_child_recipe) == r
+
+
+def test_migrate_child_recipe_fills_missing_fields():
+    r = pc.migrate_child_recipe({"slotId": "slot-x"})
+    assert r["slotId"] == "slot-x"
+    assert r["mother"]["version"] is None
+    assert r["bodies"] == []
+    assert r["dims_cm"] == {"w": 0.0, "d": 0.0, "h": 0.0}
+
+
+def test_migrate_child_recipe_handles_garbage():
+    r = pc.migrate_child_recipe({"mother": "nope", "bodies": "nope", "dims_cm": 7})
+    assert r["mother"]["fileId"] == ""
+    assert r["bodies"] == []
+    assert r["dims_cm"]["h"] == 0.0
+
+
+def test_migrate_child_recipe_coerces_dims_to_float():
+    r = pc.migrate_child_recipe({"dims_cm": {"w": "60", "d": 58, "h": 72.5}})
+    assert r["dims_cm"] == {"w": 60.0, "d": 58.0, "h": 72.5}
