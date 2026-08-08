@@ -1173,6 +1173,8 @@ git commit -m "refactor: extract the geometry core into build_engine"
 
 **Note:** use whichever of `jointOrgins` / `jointOrigins` Spike 4 recorded as `True`. The code below uses `jointOrgins`; change both occurrences if the spike says otherwise.
 
+**Carried forward from the Tasks 1–5 review — do this in Step 2:** `SheetVariants.py:68` defines `DESIGN_ATTR_GROUP = 'SheetVariants'` as its own literal, and `placeholder_core.ATTR_GROUP` is a second literal with the same value. Two independent definitions of the attribute group is a silent-divergence hazard: if one is ever changed, attributes get written to one group and read from another with **no error at all** — the feature just stops finding its own data. When you edit `SheetVariants.py` in Step 2, replace the literal with `DESIGN_ATTR_GROUP = placeholder_core.ATTR_GROUP` so there is exactly one definition.
+
 - [ ] **Step 1: Create the command module**
 
 Create `SheetVariants/placeholder_cmds.py`:
