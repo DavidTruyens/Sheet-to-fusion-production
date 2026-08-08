@@ -5,11 +5,17 @@
 # rejected during brainstorming. If updateBody does not hold, do not work around
 # it — the alternative is a materially worse feature and the user's call.
 #
-# It also probes BaseFeature.bodies, which build_engine.base_feature_bodies()
-# needs in order to know WHICH bodies to update once downstream features exist.
+# It answers two questions:
+#   3  does the downstream feature survive the swap?
+#   3b where must the body reference passed to updateBody() come from?
 #
-# Setup: an EMPTY parametric document. The script builds the whole scenario.
-# Run it once; it reports everything.
+# 3b matters because startEdit() rolls the timeline back to the base feature,
+# which recomputes and can invalidate a collection fetched across it. A first
+# attempt that called root.bRepBodies.item(0) INSIDE the edit died with
+# "RuntimeError: 3 : Bad index parameter", so the two orderings are tried as
+# independent scenarios and the working one is reported.
+#
+# Setup: an EMPTY parametric document. The script builds everything.
 
 import traceback
 
@@ -32,13 +38,53 @@ def _health(feature):
     return names.get(state, 'code {}'.format(state))
 
 
-def _box(tbm, length, width, height):
-    box = adsk.core.OrientedBoundingBox3D.create(
-        adsk.core.Point3D.create(0, 0, 0),
+def _box(tbm, offset_x, length, width, height):
+    return tbm.createBox(adsk.core.OrientedBoundingBox3D.create(
+        adsk.core.Point3D.create(offset_x, 0, 0),
         adsk.core.Vector3D.create(1, 0, 0),
         adsk.core.Vector3D.create(0, 1, 0),
-        length, width, height)
-    return tbm.createBox(box)
+        length, width, height))
+
+
+def _build_scenario(root, tbm, offset_x):
+    """A base feature holding a 10x10x10 box, plus a fillet on it standing in for
+    the designer's hand-made edit. Returns (base, fillet_count_before)."""
+    base = root.features.baseFeatures.add()
+    base.startEdit()
+    try:
+        root.bRepBodies.add(_box(tbm, offset_x, 10, 10, 10), base)
+    finally:
+        base.finishEdit()
+    adsk.doEvents()
+
+    body = base.bodies.item(0)
+    edges = adsk.core.ObjectCollection.create()
+    edges.add(body.edges.item(0))
+    fillet_input = root.features.filletFeatures.createInput()
+    fillet_input.addConstantRadiusEdgeSet(
+        edges, adsk.core.ValueInput.createByReal(1.0), True)
+    root.features.filletFeatures.add(fillet_input)
+    adsk.doEvents()
+    return base, root.features.filletFeatures.count
+
+
+def _swap(base, tbm, offset_x, capture_before):
+    """Swap the base feature's geometry for a bigger box.
+
+    ``capture_before`` decides where the body reference comes from: True takes it
+    BEFORE startEdit() (what Plan 1's rebuild_base_feature does), False re-fetches
+    it inside the edit.
+    """
+    bigger = _box(tbm, offset_x, 16, 12, 10)
+    target = base.bodies.item(0) if capture_before else None
+    base.startEdit()
+    try:
+        if target is None:
+            target = base.bodies.item(0)
+        base.updateBody(target, bigger)
+    finally:
+        base.finishEdit()
+    adsk.doEvents()
 
 
 def run(context):
@@ -59,80 +105,59 @@ def run(context):
         root = design.rootComponent
         tbm = adsk.fusion.TemporaryBRepManager.get()
 
-        # 1. A base feature holding a 10 x 10 x 10 box.
-        base = root.features.baseFeatures.add()
-        base.startEdit()
-        try:
-            root.bRepBodies.add(_box(tbm, 10, 10, 10), base)
-        finally:
-            base.finishEdit()
-        adsk.doEvents()
-        notes.append('base feature created, {} body(s)'.format(root.bRepBodies.count))
+        strategies = [
+            ('body captured BEFORE startEdit  (what Plan 1 does)', True),
+            ('body re-fetched INSIDE the edit', False),
+        ]
 
-        try:
-            notes.append('base.bodies.count before downstream: {}'
-                         .format(base.bodies.count))
-        except Exception as err:
-            notes.append('base.bodies unreadable before downstream — {}'.format(err))
+        winner = None
+        for index, (label, capture_before) in enumerate(strategies):
+            offset_x = index * 30
+            notes.append('--- {} ---'.format(label))
+            try:
+                base, fillets_before = _build_scenario(root, tbm, offset_x)
+                notes.append('base.bodies.count after downstream: {}'
+                             .format(base.bodies.count))
+                notes.append('fillets before swap: {}'.format(fillets_before))
 
-        # 2. The "designer's" downstream feature: a fillet on one edge.
-        target = root.bRepBodies.item(0)
-        edges = adsk.core.ObjectCollection.create()
-        edges.add(target.edges.item(0))
-        fillet_input = root.features.filletFeatures.createInput()
-        fillet_input.addConstantRadiusEdgeSet(
-            edges, adsk.core.ValueInput.createByReal(1.0), True)
-        root.features.filletFeatures.add(fillet_input)
-        adsk.doEvents()
-        fillets_before = root.features.filletFeatures.count
-        notes.append('fillets before swap: {}'.format(fillets_before))
+                _swap(base, tbm, offset_x, capture_before)
 
-        # base.bodies AFTER a downstream feature exists is the question
-        # build_engine.base_feature_bodies() has to answer.
-        try:
-            notes.append('base.bodies.count after downstream:  {}'
-                         .format(base.bodies.count))
-        except Exception as err:
-            notes.append('base.bodies unreadable after downstream — {}'.format(err))
-        notes.append('component bRepBodies.count:            {}'
-                     .format(root.bRepBodies.count))
+                fillets_after = root.features.filletFeatures.count
+                notes.append('fillets after swap:  {}'.format(fillets_after))
+                survived = fillets_after >= fillets_before
+                fillet = (root.features.filletFeatures.item(fillets_after - 1)
+                          if fillets_after else None)
+                notes.append('fillet health:       {}'
+                             .format(_health(fillet) if fillet else 'gone'))
+                notes.append('body volume:         {:.3f} (was 1000.000)'
+                             .format(base.bodies.item(0).volume))
+                if survived:
+                    winner = label
+                    notes.append('-> updateBody WORKED with this ordering')
+                    notes.append('')
+                    break
+                notes.append('-> downstream feature was DESTROYED')
+            except Exception as err:
+                notes.append('-> FAILED: {}'.format(err))
+            notes.append('')
 
-        # 3. Swap the base feature's geometry for a BIGGER box.
-        bigger = _box(tbm, 16, 12, 10)
-        base.startEdit()
-        try:
-            base.updateBody(root.bRepBodies.item(0), bigger)
-        finally:
-            base.finishEdit()
-        adsk.doEvents()
-
-        fillets_after = root.features.filletFeatures.count
-        notes.append('fillets after swap:  {}'.format(fillets_after))
-        survived = fillets_after == fillets_before
-        health = _health(root.features.filletFeatures.item(0)) if fillets_after else 'gone'
-        notes.append('fillet health:       {}'.format(health))
-        notes.append('body volume:         {:.3f} (was 1000.000)'
-                     .format(root.bRepBodies.item(0).volume))
-
-        # A warning or error health state is an ACCEPTABLE partial pass: the spec
-        # already says Fusion marking a broken reference is the expected outcome.
-        # Vanishing silently, or updateBody throwing, is not.
-        verdict = 'PASS' if survived else 'FAIL'
-        notes.append('')
-        notes.append('SPIKE 3: ' + verdict)
-        if survived and health != 'healthy':
-            notes.append('(partial: the feature survived but is {} — acceptable, '
-                         'the spec expects Fusion to flag broken references)'
-                         .format(health))
-        if not survived:
-            notes.append('The downstream feature was destroyed. STOP — do not code '
-                         'around this. The fallback is the freeze flag rejected '
-                         'during brainstorming, which is the user\'s decision.')
-        notes.append('')
-        notes.append('Record base.bodies.count after downstream: if it is 1, '
-                     'build_engine.base_feature_bodies() can use base.bodies; '
-                     'if it is 0 or errors, it must use the positional fallback.')
+        notes.append('SPIKE 3: ' + ('PASS' if winner else 'FAIL'))
+        if winner:
+            notes.append('3b — use this ordering in build_engine.'
+                         'rebuild_base_feature():')
+            notes.append('     {}'.format(winner))
+            notes.append('     and base.bodies IS populated, so '
+                         'base_feature_bodies() can use it rather than the '
+                         'positional fallback.')
+            notes.append('')
+            notes.append('A warning/error fillet health is an ACCEPTABLE partial '
+                         'pass — the spec expects Fusion to flag broken '
+                         'references. Report the health value.')
+        else:
+            notes.append('Neither ordering preserved the downstream feature.')
+            notes.append('STOP — do not code around this. The fallback is the '
+                         'freeze flag rejected during brainstorming, which is '
+                         'the user\'s decision to make.')
         ui.messageBox('\n'.join(notes))
     except Exception:
-        ui.messageBox('\n'.join(notes) + '\n\nSPIKE 3: FAIL (exception)\n'
-                      + traceback.format_exc())
+        ui.messageBox('\n'.join(notes) + '\n\nUnhandled:\n' + traceback.format_exc())

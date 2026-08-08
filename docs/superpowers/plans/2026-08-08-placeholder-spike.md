@@ -36,7 +36,8 @@ Fill this in as you go, then commit it.
 | 2 | Do `BRepBody` attributes survive recompute, rollback, and save/reopen? | **PASS** | After parameter change + rollback + save + close + reopen: direct read returned `slot-deadbeef`, `findAttributes` count 1, `parent=Body1 isBody=True`. Slot identity is sound — no fallback to body names needed |
 | 2b | How is `findAttributes()`' result accessed? | **`len`/index** | It returns an `AttributeVector`, **not** a Fusion collection. `attribute_list()` tries this shape first, so both plans are correct |
 | 3 | Does `BaseFeature.updateBody()` preserve downstream features? | | |
-| 3b | Is `base.bodies` populated once downstream features exist? | | |
+| 3b | Is `base.bodies` populated once downstream features exist? | **YES** | Count 1 with a fillet on top. `base_feature_bodies()` uses it; the positional fallback is a safety net, not the path |
+| 3c | Where must the body passed to `updateBody()` come from? | | Fetching it **inside** the edit died with `RuntimeError: 3 : Bad index parameter` — `startEdit()` rolls the timeline and invalidates. Re-run tests capture-before vs fetch-inside |
 | 4 | Is the joint-origin collection spelled `jointOrgins` or `jointOrigins`? | | |
 
 ### Fusion API gotchas found while spiking

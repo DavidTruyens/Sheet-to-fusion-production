@@ -2098,13 +2098,13 @@ def find_base_feature(component):
 
 
 def base_feature_bodies(component, base):
-    """The bodies the base feature owns, newest API first with a positional
-    fallback.
+    """The bodies the base feature owns.
 
-    Spike 3 records whether ``base.bodies`` is populated after downstream features
-    exist. If it is, use it — it is exact. If it is not, the fallback assumes the
-    base feature's bodies are the component's first N bodies in creation order,
-    which holds as long as downstream features modify rather than add bodies.
+    Spike 3 confirmed ``base.bodies`` stays populated once downstream features
+    exist (count 1 with a fillet on top), so it is the exact answer. The
+    positional fallback assumes the base feature's bodies are the component's
+    first N in creation order, which only holds while downstream features modify
+    rather than add bodies — it is a safety net, not the intended path.
     """
     try:
         if base.bodies.count:
@@ -2120,8 +2120,13 @@ def rebuild_base_feature(component, base, snaps, ops):
 
     ``ops`` comes from placeholder_core.pair_bodies and is already ordered
     update-then-add-then-remove, so bodies are only deleted after every op that
-    still needs to read them. Body references are resolved BEFORE startEdit()
-    because indices shift as soon as one is removed.
+    still needs to read them.
+
+    Body references are resolved BEFORE startEdit(), and that ordering is load
+    bearing, not tidiness: startEdit() rolls the timeline back to this feature,
+    which recomputes and invalidates collections fetched across it. Spike 3 hit
+    "RuntimeError: 3 : Bad index parameter" doing it the other way round. (It
+    also keeps indices stable, since a removal would shift them.)
     """
     existing = base_feature_bodies(component, base)
     base.startEdit()
