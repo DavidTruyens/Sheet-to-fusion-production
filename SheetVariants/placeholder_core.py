@@ -182,3 +182,54 @@ def mother_frame(front_axis):
         raise ValueError(
             "The mother's front axis must be one of {}.".format(", ".join(FRONT_AXES)))
     return _frame_from_outward(_AXIS_VECTORS[front_axis])
+
+
+def extents_in_frame(vertices, frame):
+    """Measure ``vertices`` along ``frame``'s axes: (width, depth, height, centre).
+
+    Vertices are world (x, y, z) tuples — a placeholder box has eight. Measuring by
+    projection rather than by reading an axis-aligned bounding box is what lets a
+    corner cabinet rotated 45 degrees report its true size instead of the much
+    larger world-aligned box around it.
+
+    Exact for any flat-faced solid. A placeholder with curved faces would
+    under-measure, since only vertices are considered; that is accepted, because a
+    placeholder is a box.
+    """
+    if not vertices:
+        raise ValueError("The placeholder has no vertices to measure.")
+    axes = frame
+    projected = [tuple(dot(v, axis) for axis in axes) for v in vertices]
+    lo = [min(p[i] for p in projected) for i in range(3)]
+    hi = [max(p[i] for p in projected) for i in range(3)]
+    mid = [(lo[i] + hi[i]) / 2.0 for i in range(3)]
+    centre = tuple(sum(mid[i] * axes[i][k] for i in range(3)) for k in range(3))
+    return (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], centre)
+
+
+def occurrence_matrix(centre, frame):
+    """Row-major local-to-world matrix for a child occurrence: the frame's axes as
+    rotation columns, translated to the box centre.
+
+    The placement lives here, on the occurrence — never baked into the bodies.
+    The designer's downstream features are defined in the component's local space,
+    so moving geometry inside the component would leave their cuts behind."""
+    w, d, u = frame
+    return [w[0], d[0], u[0], centre[0],
+            w[1], d[1], u[1], centre[1],
+            w[2], d[2], u[2], centre[2],
+            0.0, 0.0, 0.0, 1.0]
+
+
+def local_matrix(anchor, frame):
+    """Row-major world-to-anchor-local matrix, applied to snapshotted bodies so
+    they arrive with the mother's anchor at the child's origin.
+
+    This is the inverse of the mother's anchor frame. Because the frame is
+    orthonormal, the inverse rotation is its transpose and the inverse translation
+    is -(transpose . anchor) — no general matrix inversion needed."""
+    w, d, u = frame
+    return [w[0], w[1], w[2], -dot(w, anchor),
+            d[0], d[1], d[2], -dot(d, anchor),
+            u[0], u[1], u[2], -dot(u, anchor),
+            0.0, 0.0, 0.0, 1.0]

@@ -158,3 +158,80 @@ def test_mother_frame_rejects_a_vertical_axis():
     with pytest.raises(ValueError) as e:
         pc.mother_frame("+Z")
     assert "+X" in str(e.value)
+
+
+def _box_vertices(x0, y0, z0, x1, y1, z1):
+    return [(x, y, z) for x in (x0, x1) for y in (y0, y1) for z in (z0, z1)]
+
+
+def test_extents_of_an_axis_aligned_box():
+    frame = pc.target_frame((0.0, -1.0, 0.0))
+    w, d, h, centre = pc.extents_in_frame(_box_vertices(0, 0, 0, 60, 58, 72), frame)
+    assert (round(w, 9), round(d, 9), round(h, 9)) == (60.0, 58.0, 72.0)
+    assert _close(centre, (30.0, 29.0, 36.0), 1e-9)
+
+
+def test_extents_swap_when_the_front_face_faces_x():
+    frame = pc.target_frame((-1.0, 0.0, 0.0))
+    w, d, h, _ = pc.extents_in_frame(_box_vertices(0, 0, 0, 60, 58, 72), frame)
+    assert (round(w, 9), round(d, 9), round(h, 9)) == (58.0, 60.0, 72.0)
+
+
+def test_extents_of_a_rotated_box_are_not_inflated():
+    # A 60x58x72 box rotated 45 degrees about Z. A world-aligned bounding box
+    # would report ~83 wide; measuring in the frame must still report 60x58.
+    import math as m
+    c = m.cos(m.pi / 4)
+    frame = pc.target_frame((c, -c, 0.0))
+    verts = []
+    for lx, ly, lz in _box_vertices(-30, -29, 0, 30, 29, 72):
+        verts.append((lx * c - ly * c, lx * c + ly * c, lz))
+    w, d, h, centre = pc.extents_in_frame(verts, frame)
+    assert abs(w - 60.0) < 1e-9
+    assert abs(d - 58.0) < 1e-9
+    assert abs(h - 72.0) < 1e-9
+    assert _close(centre, (0.0, 0.0, 36.0), 1e-9)
+
+
+def test_extents_rejects_an_empty_vertex_list():
+    with pytest.raises(ValueError):
+        pc.extents_in_frame([], pc.target_frame((0.0, -1.0, 0.0)))
+
+
+def test_occurrence_matrix_places_the_origin_at_the_centre():
+    frame = pc.target_frame((0.0, -1.0, 0.0))
+    m = pc.occurrence_matrix((10.0, 20.0, 30.0), frame)
+    assert len(m) == 16
+    assert [m[3], m[7], m[11]] == [10.0, 20.0, 30.0]
+    assert m[12:] == [0.0, 0.0, 0.0, 1.0]
+    # Identity rotation for a -Y-facing frame: columns are w, d, u.
+    assert [m[0], m[1], m[2]] == [1.0, 0.0, 0.0]
+    assert [m[4], m[5], m[6]] == [0.0, 1.0, 0.0]
+
+
+def test_occurrence_matrix_rotation_for_an_x_facing_frame():
+    frame = pc.target_frame((-1.0, 0.0, 0.0))
+    m = pc.occurrence_matrix((0.0, 0.0, 0.0), frame)
+    # depth is +X, so the matrix's second column must be (1, 0, 0).
+    assert [m[1], m[5], m[9]] == [1.0, 0.0, 0.0]
+
+
+def test_local_matrix_sends_the_anchor_to_the_origin():
+    frame = pc.mother_frame("-Y")
+    m = pc.local_matrix((5.0, 6.0, 7.0), frame)
+    assert [m[3], m[7], m[11]] == [-5.0, -6.0, -7.0]
+
+
+def test_local_matrix_is_the_inverse_of_the_mother_frame():
+    frame = pc.mother_frame("+X")
+    anchor = (5.0, 6.0, 7.0)
+    m = pc.local_matrix(anchor, frame)
+    # Applying it to the anchor point must land exactly on the origin.
+    def apply(mat, p):
+        return tuple(mat[r * 4 + 0] * p[0] + mat[r * 4 + 1] * p[1]
+                     + mat[r * 4 + 2] * p[2] + mat[r * 4 + 3] for r in range(3))
+    assert _close(apply(m, anchor), (0.0, 0.0, 0.0), 1e-9)
+    # And a point one unit along the mother's depth axis must land at (0, 1, 0).
+    w, d, u = frame
+    ahead = tuple(anchor[i] + d[i] for i in range(3))
+    assert _close(apply(m, ahead), (0.0, 1.0, 0.0), 1e-9)
