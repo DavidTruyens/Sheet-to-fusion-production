@@ -5,19 +5,29 @@
 # rejected during brainstorming. If updateBody does not hold, do not work around
 # it — the alternative is a materially worse feature and the user's call.
 #
-# History of this spike, because the errors were informative:
-#   attempt 1: root.bRepBodies.item(0) fetched INSIDE the edit
-#              -> RuntimeError: 3 : Bad index parameter
-#              startEdit() rolls the timeline back, invalidating collections.
-#   attempt 2: base.bodies.item(0) captured BEFORE the edit
-#              -> "Invalid argument sourceBody. Not a source body for this base
-#              feature". base.bodies is what the feature PRODUCES in the current
-#              timeline state — after a fillet that is the filleted result, not
-#              the geometry fed in. updateBody wants the SOURCE body.
+# The documented contract (help.autodesk.com, BaseFeature.updateBody):
+#   sourceBody — "The source BRepBody to update. The source bodies of a
+#                 BaseFeature are only available from the bodies collection of
+#                 the BaseFeature WHEN THE BASEFEATURE IS IN EDIT MODE."
+#   bodies     — "When editing, it returns bodies owned by or used by the base
+#                 feature. When inactive, it returns result bodies."
+#   startEdit  — "Set the USER-INTERFACE so that the base body is in edit mode."
 #
-# So this version probes what the base feature actually exposes, then tries the
-# source-body candidates. Each attempt runs in its OWN fresh document: sharing
-# one document let a failed edit poison the next attempt.
+# Earlier runs dumped `bodies` before and inside the edit and got IDENTICAL
+# output, which means edit mode had not actually engaged — startEdit() is a UI
+# operation and needs adsk.doEvents() to take effect. That is the variable this
+# version isolates.
+#
+# It also adds the CONTROL that was missing: a base feature with NO downstream
+# feature. Earlier runs varied the call shape and the downstream feature at the
+# same time, so a failure could not be attributed to either.
+#
+#   control, no fillet, doEvents   -> is the CALL right?
+#   control, no fillet, no doEvents -> is doEvents the reason?
+#   with fillet,        doEvents   -> does the downstream feature SURVIVE?
+#
+# Only the third scenario says anything about the design. The first two say
+# whether we are calling the API correctly.
 #
 # Setup: none. Run it from anywhere; it creates and closes its own documents.
 
@@ -35,7 +45,6 @@ def _seq(collection):
     Real collections have .count / .item(i) — base.bodies is one. The *Vector
     types are Python sequences with neither: AttributeVector (spike 2) and
     BRepBodyVector (base.sourceBodies) both raise AttributeError on .count.
-    Normalise both so callers stop having to guess.
     """
     try:
         return [collection.item(i) for i in range(collection.count)]
@@ -66,99 +75,90 @@ def _box(tbm, length, width, height):
         length, width, height))
 
 
-def _fresh_document():
-    """A new parametric design, so no attempt inherits another's broken edit."""
-    doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
-    adsk.doEvents()
-    design = adsk.fusion.Design.cast(
-        doc.products.itemByProductType('DesignProductType'))
-    return doc, design
-
-
-def _build_scenario(design, tbm):
-    """A base feature holding a 10x10x10 box, plus a fillet on it standing in for
-    the designer's hand-made edit. Returns the base feature."""
-    root = design.rootComponent
-    base = root.features.baseFeatures.add()
-    base.startEdit()
-    try:
-        root.bRepBodies.add(_box(tbm, 10, 10, 10), base)
-    finally:
-        base.finishEdit()
-    adsk.doEvents()
-
-    edges = adsk.core.ObjectCollection.create()
-    edges.add(root.bRepBodies.item(0).edges.item(0))
-    fillet_input = root.features.filletFeatures.createInput()
-    fillet_input.addConstantRadiusEdgeSet(
-        edges, adsk.core.ValueInput.createByReal(1.0), True)
-    root.features.filletFeatures.add(fillet_input)
-    adsk.doEvents()
-    return base
-
-
-def _dump(base, when):
-    """What the base feature exposes, and whether each collection is readable."""
-    lines = ['  {}:'.format(when)]
+def _fingerprint(base):
+    """Enough to tell whether `bodies` switched from result bodies to source
+    bodies. If edit mode engaged, these should differ inside vs outside."""
+    out = []
     for attr in ('bodies', 'sourceBodies'):
-        if not hasattr(base, attr):
-            lines.append('    {}: NOT PRESENT on this API version'.format(attr))
-            continue
         try:
             items = _seq(getattr(base, attr))
-            lines.append('    {}: count={} {}'
-                         .format(attr, len(items), [b.name for b in items]))
+            out.append('{}={}x[{}]'.format(
+                attr, len(items),
+                ','.join('{}:{:.1f}'.format(b.name, b.volume) for b in items)))
         except Exception as err:
-            lines.append('    {}: unreadable — {}'.format(attr, err))
-    return lines
+            out.append('{}=unreadable({})'.format(attr, err))
+    return '  '.join(out)
 
 
-def _attempt(label, tbm, pick):
-    """Build a scenario in a fresh document and swap its geometry.
+def _scenario(label, tbm, with_fillet, do_events):
+    """Build a base feature (optionally with a fillet on top) in a fresh document,
+    then swap its geometry. Returns (notes, outcome).
 
-    ``pick(base, inside)`` returns the body to hand to updateBody; it is called
-    once before startEdit() and once inside, and whichever call returns a body is
-    used — that is how the two orderings are distinguished.
-
-    Returns (notes, outcome) where outcome is 'survived', 'destroyed' or 'errored'.
-    These are NOT the same result: only 'destroyed' says anything about the design.
+    outcome is 'survived' | 'destroyed' | 'errored' | 'control-ok'.
+    Only 'destroyed' says anything about the design.
     """
     notes = ['--- {} ---'.format(label)]
     doc = None
     try:
-        doc, design = _fresh_document()
+        doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+        adsk.doEvents()
+        design = adsk.fusion.Design.cast(
+            doc.products.itemByProductType('DesignProductType'))
         root = design.rootComponent
-        base = _build_scenario(design, tbm)
-        fillets_before = root.features.filletFeatures.count
-        notes.extend(_dump(base, 'before startEdit'))
-        notes.append('  fillets before swap: {}'.format(fillets_before))
 
-        bigger = _box(tbm, 16, 12, 10)
-        target = pick(base, False)
+        base = root.features.baseFeatures.add()
         base.startEdit()
         try:
-            notes.extend(_dump(base, 'inside the edit'))
-            if target is None:
-                target = pick(base, True)
-            if target is None:
-                notes.append('  -> no candidate body available')
-                return notes, 'errored'
-            notes.append('  passing body: {}'.format(target.name))
-            base.updateBody(target, bigger)
+            root.bRepBodies.add(_box(tbm, 10, 10, 10), base)
         finally:
             base.finishEdit()
         adsk.doEvents()
+
+        if with_fillet:
+            edges = adsk.core.ObjectCollection.create()
+            edges.add(root.bRepBodies.item(0).edges.item(0))
+            fillet_input = root.features.filletFeatures.createInput()
+            fillet_input.addConstantRadiusEdgeSet(
+                edges, adsk.core.ValueInput.createByReal(1.0), True)
+            root.features.filletFeatures.add(fillet_input)
+            adsk.doEvents()
+        fillets_before = root.features.filletFeatures.count
+        notes.append('  fillets before swap: {}'.format(fillets_before))
+        notes.append('  outside edit: {}'.format(_fingerprint(base)))
+
+        bigger = _box(tbm, 16, 12, 10)
+        base.startEdit()
+        try:
+            if do_events:
+                adsk.doEvents()          # <-- the variable under test
+            notes.append('  inside edit:  {}'.format(_fingerprint(base)))
+            sources = _seq(base.bodies)
+            if not sources:
+                notes.append('  -> no source body available inside the edit')
+                return notes, 'errored'
+            notes.append('  passing body: {} (volume {:.1f})'
+                         .format(sources[0].name, sources[0].volume))
+            result = base.updateBody(sources[0], bigger)
+            notes.append('  updateBody returned: {}'.format(result))
+        finally:
+            base.finishEdit()
+        adsk.doEvents()
+
+        volume = root.bRepBodies.item(0).volume
+        notes.append('  body volume after:   {:.3f} (was 1000.000, '
+                     'expect 1920.000)'.format(volume))
+        if not with_fillet:
+            notes.append('  -> CONTROL OK: the call itself works')
+            return notes, 'control-ok'
 
         fillets_after = root.features.filletFeatures.count
         notes.append('  fillets after swap:  {}'.format(fillets_after))
         if fillets_after < fillets_before:
             notes.append('  -> downstream feature DESTROYED')
             return notes, 'destroyed'
-        fillet = root.features.filletFeatures.item(0)
-        notes.append('  fillet health:       {}'.format(_health(fillet)))
-        notes.append('  body volume:         {:.3f} (was 1000.000)'
-                     .format(root.bRepBodies.item(0).volume))
-        notes.append('  -> updateBody WORKED with this ordering')
+        notes.append('  fillet health:       {}'
+                     .format(_health(root.features.filletFeatures.item(0))))
+        notes.append('  -> downstream feature SURVIVED')
         return notes, 'survived'
     except Exception as err:
         notes.append('  -> errored: {}'.format(err))
@@ -177,57 +177,53 @@ def run(context):
     notes = []
     try:
         tbm = adsk.fusion.TemporaryBRepManager.get()
-
-        def source(base, want_inside, inside):
-            if inside != want_inside:
-                return None
-            items = _seq(base.sourceBodies)
-            return items[0] if items else None
-
-        attempts = [
-            ('sourceBodies, captured BEFORE the edit',
-             lambda base, inside: source(base, False, inside)),
-            ('sourceBodies, fetched INSIDE the edit',
-             lambda base, inside: source(base, True, inside)),
-            ('bodies, fetched INSIDE the edit',
-             lambda base, inside: (_seq(base.bodies)[0]
-                                   if inside and _seq(base.bodies) else None)),
+        scenarios = [
+            ('CONTROL: no fillet, doEvents after startEdit', False, True),
+            ('CONTROL: no fillet, NO doEvents', False, False),
+            ('THE REAL TEST: fillet on top, doEvents after startEdit', True, True),
         ]
 
-        winner = None
-        outcomes = []
-        for label, pick in attempts:
-            attempt_notes, outcome = _attempt(label, tbm, pick)
-            notes.extend(attempt_notes)
+        results = {}
+        for label, with_fillet, do_events in scenarios:
+            scenario_notes, outcome = _scenario(label, tbm, with_fillet, do_events)
+            notes.extend(scenario_notes)
             notes.append('')
-            outcomes.append(outcome)
-            if outcome == 'survived':
-                winner = label
-                break
+            results[label] = outcome
 
-        notes.append('=' * 40)
-        if winner:
-            notes.append('SPIKE 3: PASS')
-            notes.append('3c — use this in build_engine.rebuild_base_feature():')
-            notes.append('     {}'.format(winner))
-            notes.append('')
-            notes.append('A warning/error fillet health is an ACCEPTABLE partial '
-                         'pass — the spec expects Fusion to flag broken '
-                         'references. Report the health value.')
-        elif 'destroyed' in outcomes:
-            notes.append('SPIKE 3: FAIL — updateBody ran but DESTROYED the '
+        control_ok = results[scenarios[0][0]] == 'control-ok'
+        control_no_events = results[scenarios[1][0]]
+        real = results[scenarios[2][0]]
+
+        notes.append('=' * 46)
+        if not control_ok:
+            notes.append('SPIKE 3: INCONCLUSIVE')
+            notes.append('The control failed, so we still are not calling '
+                         'updateBody correctly. This says NOTHING about whether '
+                         'downstream features survive. Stop guessing and report '
+                         'the fingerprints above.')
+        elif real == 'survived':
+            notes.append('SPIKE 3: PASS — the downstream feature survived.')
+            notes.append('Report the fillet health: warning/error is an acceptable '
+                         'partial pass, since the spec expects Fusion to flag a '
+                         'broken reference.')
+        elif real == 'destroyed':
+            notes.append('SPIKE 3: FAIL — updateBody worked but DESTROYED the '
                          'downstream feature.')
             notes.append('STOP. This disproves the design\'s central promise. Do '
                          'not code around it — the fallback is the freeze flag '
                          'rejected during brainstorming, which is the user\'s '
-                         'decision to make.')
+                         'decision.')
         else:
-            notes.append('SPIKE 3: INCONCLUSIVE — every attempt errored before '
-                         'updateBody did any work.')
-            notes.append('This says nothing about whether downstream features '
-                         'survive; it means we have not found the right way to '
-                         'call it yet. Report the dumps above — they show what '
-                         'the base feature actually exposes.')
+            notes.append('SPIKE 3: INCONCLUSIVE — the control passed but the '
+                         'fillet scenario errored rather than resolving.')
+            notes.append('A downstream feature changes how updateBody behaves. '
+                         'Report the error above.')
+
+        notes.append('')
+        notes.append('doEvents after startEdit was {}'.format(
+            'REQUIRED — the no-doEvents control {}'.format(
+                'also passed, so it is not the cause'
+                if control_no_events == 'control-ok' else 'failed')))
         ui.messageBox('\n'.join(notes))
     except Exception:
         ui.messageBox('\n'.join(notes) + '\n\nUnhandled:\n' + traceback.format_exc())
