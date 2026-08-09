@@ -319,6 +319,36 @@ def test_validate_comma_decimal_is_error_with_cell_ref():
     assert any("18,2" in e and "B3" in e for e in rep.errors)
 
 
+def test_known_mothers_defaults_to_empty():
+    assert sheet_core.known_mothers({}) == []
+    assert sheet_core.known_mothers({"mothers": "nonsense"}) == []
+
+
+def test_remember_mother_adds_an_entry():
+    s = {}
+    sheet_core.remember_mother(s, {"fileId": "urn:a", "name": "base.f3d",
+                                   "sheetUrl": "https://s", "tab": "Cab"})
+    assert sheet_core.known_mothers(s) == [
+        {"fileId": "urn:a", "name": "base.f3d", "sheetUrl": "https://s", "tab": "Cab"}]
+
+
+def test_remember_mother_replaces_by_file_id():
+    s = {}
+    sheet_core.remember_mother(s, {"fileId": "urn:a", "name": "old.f3d",
+                                   "sheetUrl": "", "tab": ""})
+    sheet_core.remember_mother(s, {"fileId": "urn:a", "name": "new.f3d",
+                                   "sheetUrl": "https://s", "tab": "Cab"})
+    mothers = sheet_core.known_mothers(s)
+    assert len(mothers) == 1
+    assert mothers[0]["name"] == "new.f3d"
+
+
+def test_remember_mother_ignores_an_entry_with_no_file_id():
+    s = {}
+    sheet_core.remember_mother(s, {"name": "x.f3d"})
+    assert sheet_core.known_mothers(s) == []
+
+
 def test_validate_missing_name_header_is_error():
     rep = sheet_core.validate_mapping(["Naam", "diameter"], [], {"diameter"}, ["diameter"])
     assert not rep.ok

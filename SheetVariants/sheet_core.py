@@ -385,3 +385,30 @@ def validate_mapping(header, rows, known_param_names, driveable_param_names):
     if empty_count:
         rep.warnings.append("{} empty cell(s) left unchanged.".format(empty_count))
     return rep
+
+
+_MOTHER_FIELDS = ("fileId", "name", "sheetUrl", "tab")
+
+
+def known_mothers(settings):
+    """Previously-used mother models, as a cache for populating dropdowns without
+    opening documents. The mother's own attributes remain the source of truth;
+    this is refreshed whenever a mother is actually opened."""
+    mothers = (settings or {}).get("mothers")
+    if not isinstance(mothers, list):
+        return []
+    out = []
+    for entry in mothers:
+        if isinstance(entry, dict) and entry.get("fileId"):
+            out.append({k: str(entry.get(k) or "") for k in _MOTHER_FIELDS})
+    return out
+
+
+def remember_mother(settings, mother):
+    """Add or replace a cached mother, keyed by fileId. Entries with no fileId are
+    ignored — without one the mother could never be reopened."""
+    if not isinstance(mother, dict) or not mother.get("fileId"):
+        return
+    entry = {k: str(mother.get(k) or "") for k in _MOTHER_FIELDS}
+    kept = [m for m in known_mothers(settings) if m["fileId"] != entry["fileId"]]
+    settings["mothers"] = kept + [entry]

@@ -196,6 +196,227 @@ class PrepareExecuteHandler(adsk.core.CommandEventHandler):
             ui.messageBox('Prepare Mother Model failed:\n' + traceback.format_exc())
 
 
+FILL_CMD_ID = 'sheetVariantsFillPlaceholdersCmd'
+FILL_CMD_NAME = 'Fill Placeholders'
+FILL_CMD_DESC = ('Assign a prepared mother model, at a chosen config, to the '
+                 'selected placeholder boxes. Each box drives its own width, '
+                 'depth and height.')
+
+
+def _body_vertices(body):
+    """World (x, y, z) of every vertex of ``body``, in centimetres."""
+    verts = body.vertices
+    out = []
+    for i in range(verts.count):
+        point = verts.item(i).geometry
+        out.append((point.x, point.y, point.z))
+    return out
+
+
+def read_slot_id(body):
+    try:
+        attr = body.attributes.itemByName(placeholder_core.ATTR_GROUP,
+                                          placeholder_core.SLOT_ID_ATTR)
+        return attr.value if attr else ''
+    except Exception:
+        return ''
+
+
+def ensure_slot_id(body):
+    """This body's slot id, stamping a new one the first time it is filled."""
+    existing = read_slot_id(body)
+    if existing:
+        return existing
+    slot_id = placeholder_core.new_slot_id()
+    body.attributes.add(placeholder_core.ATTR_GROUP,
+                        placeholder_core.SLOT_ID_ATTR, slot_id)
+    return slot_id
+
+
+def resolve_slots(faces):
+    """Phase 0: turn selected front faces into plain-data build recipes.
+
+    Everything a later phase needs is copied out into plain Python here, because
+    activating another document invalidates every live Fusion reference. Returns
+    (slots, problems); a face that cannot be resolved contributes a problem and no
+    slot, so one bad pick does not lose the whole selection.
+    """
+    slots, problems, seen = [], [], set()
+    for face in faces:
+        body = face.body
+        name = body.name
+        if name in seen:
+            problems.append('"{}" was selected more than once — using the first '
+                            'face only.'.format(name))
+            continue
+        try:
+            normal = face.geometry.normal
+            frame = placeholder_core.target_frame((normal.x, normal.y, normal.z))
+            width, depth, height, centre = placeholder_core.extents_in_frame(
+                _body_vertices(body), frame)
+        except ValueError as err:
+            problems.append('"{}": {}'.format(name, err))
+            continue
+        seen.add(name)
+        slots.append({
+            'body': body,
+            'slotId': read_slot_id(body),
+            'dims_cm': (width, depth, height),
+            'matrix': placeholder_core.occurrence_matrix(centre, frame),
+            'name': name,
+        })
+    return slots, problems
+
+
+def _mother_options(design):
+    """Cached mothers plus any prepared document currently open, keyed by fileId
+    so an open document supersedes its cache entry."""
+    import sheet_core
+    import SheetVariants
+    settings = sheet_core.load_settings(SheetVariants.SETTINGS_FILE)
+    options = {m['fileId']: m for m in sheet_core.known_mothers(settings)}
+    for i in range(app.documents.count):
+        doc = app.documents.item(i)
+        try:
+            other = adsk.fusion.Design.cast(
+                doc.products.itemByProductType('DesignProductType'))
+            if not other or not doc.dataFile:
+                continue
+            setup = read_mother_setup(other)
+            if placeholder_core.validate_mother_setup(setup):
+                continue
+            options[doc.dataFile.id] = {
+                'fileId': doc.dataFile.id, 'name': doc.name,
+                'sheetUrl': SheetVariants.load_design_url(other), 'tab': ''}
+        except Exception:
+            continue
+    return sorted(options.values(), key=lambda m: m['name'])
+
+
+class FillCreatedHandler(adsk.core.CommandCreatedEventHandler):
+    def notify(self, args):
+        cmd = args.command
+        inputs = cmd.commandInputs
+        design = adsk.fusion.Design.cast(app.activeProduct)
+        if not design:
+            inputs.addTextBoxCommandInput('err', '', 'Open a design first.', 2, True)
+            return
+
+        selection = inputs.addSelectionInput(
+            'faces', 'Front faces', 'Select the front face of each placeholder box')
+        selection.addSelectionFilter('PlanarFaces')
+        selection.setSelectionLimits(1, 0)
+
+        mothers = _mother_options(design)
+        if not mothers:
+            inputs.addTextBoxCommandInput(
+                'nomother', '',
+                'No prepared mother models found. Open one and run Prepare Mother '
+                'Model first.', 3, True)
+            return
+        drop = inputs.addDropDownCommandInput(
+            'mother', 'Mother model', adsk.core.DropDownStyles.TextListDropDownStyle)
+        for index, mother in enumerate(mothers):
+            drop.listItems.add(mother['name'], index == 0)
+
+        config = inputs.addDropDownCommandInput(
+            'config', 'Config', adsk.core.DropDownStyles.TextListDropDownStyle)
+        config.listItems.add('— press Load configs —', True)
+        inputs.addBoolValueInput('loadConfigs', 'Load configs', False, '', False)
+        inputs.addTextBoxCommandInput('report', 'Resolved', '', 6, True)
+
+        for handler_class, event in ((FillInputChangedHandler, cmd.inputChanged),
+                                     (FillExecuteHandler, cmd.execute)):
+            handler = handler_class()
+            event.add(handler)
+            _handlers.append(handler)
+
+        cmd.setDialogInitialSize(460, 460)
+
+
+def _selected_mother(inputs):
+    item = inputs.itemById('mother').selectedItem if inputs.itemById('mother') else None
+    if not item:
+        return None
+    for mother in _mother_options(adsk.fusion.Design.cast(app.activeProduct)):
+        if mother['name'] == item.name:
+            return mother
+    return None
+
+
+def _describe(slots, problems):
+    lines = []
+    for slot in slots:
+        width, depth, height = slot['dims_cm']
+        lines.append('{} — {:.0f} x {:.0f} x {:.0f} mm'.format(
+            slot['name'], width * 10, depth * 10, height * 10))
+    for problem in problems:
+        lines.append('! ' + problem)
+    return '<br/>'.join(lines) if lines else 'Nothing selected yet.'
+
+
+class FillInputChangedHandler(adsk.core.InputChangedEventHandler):
+    def notify(self, args):
+        try:
+            inputs = args.inputs
+            changed = args.input
+            if changed.id == 'faces':
+                selection = inputs.itemById('faces')
+                faces = [selection.selection(i).entity
+                         for i in range(selection.selectionCount)]
+                slots, problems = resolve_slots(faces)
+                inputs.itemById('report').formattedText = _describe(slots, problems)
+            elif changed.id == 'loadConfigs' and changed.value:
+                changed.value = False
+                mother = _selected_mother(inputs)
+                if not mother or not mother['sheetUrl']:
+                    ui.messageBox('That mother has no sheet link yet. Open it and '
+                                  'run Build Variants Assembly from Sheet once to '
+                                  'link its sheet.')
+                    return
+                import SheetVariants
+                rows = SheetVariants.get_rows(mother['sheetUrl'], mother['tab'] or None)
+                config = inputs.itemById('config')
+                config.listItems.clear()
+                for index, row in enumerate(rows[1:]):
+                    name = (row[0] or '').strip()
+                    if name:
+                        config.listItems.add(name, config.listItems.count == 0)
+                if not config.listItems.count:
+                    config.listItems.add('— no named rows —', True)
+        except Exception:
+            import traceback
+            ui.messageBox('Fill Placeholders failed:\n' + traceback.format_exc())
+
+
+class FillExecuteHandler(adsk.core.CommandEventHandler):
+    def notify(self, args):
+        try:
+            inputs = args.firingEvent.sender.commandInputs
+            selection = inputs.itemById('faces')
+            if not selection:
+                return
+            faces = [selection.selection(i).entity
+                     for i in range(selection.selectionCount)]
+            slots, problems = resolve_slots(faces)
+            mother = _selected_mother(inputs)
+            item = inputs.itemById('config').selectedItem
+            config = item.name if item else ''
+            lines = ['DRY RUN — no geometry built yet.', '',
+                     'mother: {}'.format(mother['name'] if mother else '(none)'),
+                     'config: {}'.format(config), '']
+            for slot in slots:
+                width, depth, height = slot['dims_cm']
+                lines.append('{}  {:.1f} x {:.1f} x {:.1f} mm  slot={}'.format(
+                    slot['name'], width * 10, depth * 10, height * 10,
+                    slot['slotId'] or '(new)'))
+            lines.extend('! ' + p for p in problems)
+            ui.messageBox('\n'.join(lines))
+        except Exception:
+            import traceback
+            ui.messageBox('Fill Placeholders failed:\n' + traceback.format_exc())
+
+
 _handlers = []
 
 # Panel this module last registered its controls into, so unregister() can find
@@ -206,10 +427,10 @@ _handlers = []
 _panel = None
 
 # (cmd_id, name, description, CommandCreatedEventHandler class) for every
-# command this module registers. Task 8 (Fill Placeholders) adds a second
-# tuple here — register() and unregister() both already loop over this.
+# command this module registers. register() and unregister() both loop over this.
 _COMMANDS = (
     (PREPARE_CMD_ID, PREPARE_CMD_NAME, PREPARE_CMD_DESC, PrepareCreatedHandler),
+    (FILL_CMD_ID, FILL_CMD_NAME, FILL_CMD_DESC, FillCreatedHandler),
 )
 
 
