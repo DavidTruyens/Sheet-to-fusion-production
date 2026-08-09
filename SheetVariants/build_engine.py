@@ -106,7 +106,7 @@ def snapshot_bodies(bodies):
         except Exception:
             continue
         appearance = material = None
-        component_name = ''
+        component_name = body_name = ''
         try:
             appearance = body.appearance
         except Exception:
@@ -119,11 +119,15 @@ def snapshot_bodies(bodies):
             component_name = body.parentComponent.name
         except Exception:
             pass
+        try:
+            body_name = body.name
+        except Exception:
+            pass
         snaps.append({
             'temp': temp,
             'appearance': appearance,
             'material': material,
-            'name': placeholder_core.qualified_body_name(component_name, body.name),
+            'name': placeholder_core.qualified_body_name(component_name, body_name),
         })
     return snaps
 

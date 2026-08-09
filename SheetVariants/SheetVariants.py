@@ -366,10 +366,15 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 name = raw_name or 'Variant_{}'.format(i + 1)
                 safe_name = re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip() or 'Variant_{}'.format(i + 1)
 
+                # Re-derive design + parameter FRESH for every apply: setting a
+                # driving dimension recomputes the model, which can invalidate the
+                # parameter collection (see build_engine._design()'s docstring).
                 values = {}
                 for col, pname in enumerate(param_names, start=1):
                     if col < len(row):
-                        values[pname] = row[col].strip()
+                        val = row[col].strip()
+                        if val:
+                            values[pname] = val
                 build_engine.apply_values(values)
                 adsk.doEvents()  # recompute the source with this variant's values
 
