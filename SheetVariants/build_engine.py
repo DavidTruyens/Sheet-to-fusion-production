@@ -282,17 +282,29 @@ def rebuild_base_feature(component, base, snaps, ops):
     update-then-add-then-remove, so bodies are only deleted after every op that
     still needs to read them.
 
-    Body references are resolved BEFORE startEdit(), and that ordering is load
-    bearing, not tidiness: startEdit() rolls the timeline back to this feature,
-    which recomputes and invalidates collections fetched across it. Spike 3 hit
-    "RuntimeError: 3 : Bad index parameter" doing it the other way round. (It
-    also keeps indices stable, since a removal would shift them.)
+    Body references are resolved INSIDE the edit (base.startEdit() is now inside
+    this same try, so a raw failure there also comes back as a proper "rebuild
+    failed:" reason rather than an uncaught exception) and materialised into a
+    plain Python list rather than re-read from a live collection at each index:
+    a 'remove' calls deleteMe() on one of those bodies, and re-querying the live
+    collection afterward would renumber around the hole it left, silently
+    shifting every later op's old_index onto the wrong body. Snapshotting once,
+    up front, keeps every index in ``ops`` pointing at what it meant when
+    placeholder_core.pair_bodies computed it, for the whole of this edit.
 
-    Spike 3 also established that base.bodies must be read INSIDE the edit: the
+    Spike 3 established that base.bodies must be read INSIDE the edit: the
     documented dual behaviour is real, and outside the edit it returns the
     downstream RESULT body (a filleted 997.9) rather than the SOURCE body (1000.0)
     that updateBody demands. Passing the result body fails with "Invalid argument
     sourceBody. Not a source body for this base feature".
+
+    Before touching anything, the resolved body count is checked against what
+    ``ops`` expects to find (one 'update' or 'remove' per original body). A
+    mismatch — a stale or corrupted recipe, or base_feature_bodies() having
+    fallen back to ALL of the component's bodies because base.bodies came back
+    empty, which can include a body the designer added downstream — refuses the
+    whole rebuild instead of letting an unvalidated 'remove' call deleteMe() on
+    whatever happens to sit at that index.
 
     finishEdit() is where the designer's downstream features recompute, and it CAN
     RAISE — spike 3 measured InternalValidationError when a fillet built on an edge
@@ -302,11 +314,23 @@ def rebuild_base_feature(component, base, snaps, ops):
 
     Returns "" on success, or a human-readable reason the rebuild failed.
     """
-    existing = None
-    base.startEdit()
+    def _safe_finish():
+        try:
+            base.finishEdit()
+        except Exception:
+            pass
+
     try:
+        base.startEdit()
         # Inside the edit: base.bodies is now the base feature's SOURCE bodies.
         existing = base_feature_bodies(component, base)
+        expected = sum(1 for kind, _, _ in ops if kind in ('update', 'remove'))
+        if len(existing) != expected:
+            _safe_finish()
+            return ("the child's recorded bodies ({}) no longer match what its "
+                    "base feature actually holds ({}) — its recipe may be stale, "
+                    "or a body was added or removed outside this add-in."
+                    .format(expected, len(existing)))
         for kind, old_index, new_index in ops:
             if kind == 'update':
                 base.updateBody(existing[old_index], snaps[new_index]['temp'])
@@ -315,10 +339,7 @@ def rebuild_base_feature(component, base, snaps, ops):
             elif kind == 'remove':
                 existing[old_index].deleteMe()
     except Exception as err:
-        try:
-            base.finishEdit()
-        except Exception:
-            pass
+        _safe_finish()
         return 'geometry swap failed: {}'.format(err)
     try:
         base.finishEdit()

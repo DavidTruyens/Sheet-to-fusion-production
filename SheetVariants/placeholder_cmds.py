@@ -572,20 +572,27 @@ def find_children(design):
 
     findAttributes returns the whole set in one call, so no occurrence tree is
     walked. The attribute is written on the component, so its occurrence is found
-    by matching component names against the root's occurrences.
+    by matching component names against the root's occurrences. Both loops guard
+    per-item, matching find_slot_bodies' pattern: one dead occurrence or one
+    unreadable attribute must not collapse this whole lookup to {}, which would
+    read every already-filled slot as unfilled and duplicate it instead of
+    rebuilding it in place.
     """
     found = {}
     by_component = {}
     for occurrence in design.rootComponent.occurrences:
-        by_component.setdefault(occurrence.component.name, occurrence)
+        try:
+            by_component.setdefault(occurrence.component.name, occurrence)
+        except Exception:
+            continue
     for attribute in attribute_list(design.findAttributes(
             placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR)):
-        recipe = placeholder_core.loads_attr(attribute.value,
-                                             placeholder_core.migrate_child_recipe)
         try:
+            recipe = placeholder_core.loads_attr(attribute.value,
+                                                 placeholder_core.migrate_child_recipe)
             occurrence = by_component.get(attribute.parent.name)
         except Exception:
-            occurrence = None
+            continue
         if occurrence and recipe['slotId']:
             found[recipe['slotId']] = (occurrence, recipe)
     return found
@@ -593,23 +600,31 @@ def find_children(design):
 
 def rebuild_child(design, occurrence, recipe, snaps, matrix16):
     """Swap a child's geometry and re-place it, keeping the component and anything
-    the designer built on top of it. Returns a report line."""
+    the designer built on top of it.
+
+    Returns ``(ok, line)``: ``line`` is always a human-readable report line,
+    ``ok`` says whether the swap actually happened. Callers must branch on
+    ``ok`` rather than on ``line``'s wording — dispatching control flow on a
+    prose substring would couple a caller to this function's message text.
+    When ``ok`` is False the geometry may be in a bad state, so nothing here
+    re-places or re-skins the child; the caller must not treat it as rebuilt
+    either (no new recipe, no touching the placeholder box).
+    """
     component = occurrence.component
     base = build_engine.find_base_feature(component)
     if base is None:
-        return '{} — cannot rebuild: its base feature was deleted'.format(component.name)
+        return False, '{} — cannot rebuild: its base feature was deleted'.format(
+            component.name)
     ops = placeholder_core.pair_bodies(recipe['bodies'], [s['name'] for s in snaps])
     failure = build_engine.rebuild_base_feature(component, base, snaps, ops)
     if failure:
-        # The geometry may be in a bad state, so do not re-place or re-skin it.
-        # Report and leave it for the user to inspect.
-        return '{} — rebuild failed: {}'.format(component.name, failure)
+        return False, '{} — rebuild failed: {}'.format(component.name, failure)
     build_engine.reapply_looks(design, component, snaps)
     matrix = adsk.core.Matrix3D.create()
     matrix.setWithArray(matrix16)
     occurrence.transform2 = matrix
     changed = sum(1 for op in ops if op[0] != 'update')
-    return '{} — rebuilt {} bodies{}'.format(
+    return True, '{} — rebuilt {} bodies{}'.format(
         component.name, len(snaps),
         ', {} added or removed'.format(changed) if changed else '')
 
@@ -933,25 +948,37 @@ def build_children(slots, mother, config):
                          for s in template]
 
                 existing = children.get(slot['slotId']) if slot['slotId'] else None
+                new_names = [s['name'] for s in snaps]
                 if existing:
                     # Already filled: swap the geometry in place inside its base
                     # feature (rebuild_child / rebuild_base_feature) instead of
                     # recreating the component, so downstream features the
-                    # designer added survive. rebuild_child never raises for an
-                    # expected failure (an old base feature, a downstream
-                    # feature that could not recompute) — it reports instead —
-                    # so that is detected from its message rather than from an
-                    # exception here.
+                    # designer added survive. rebuild_child reports an expected
+                    # failure (an old base feature, a stale recipe, a downstream
+                    # feature that could not recompute) via its (ok, line)
+                    # return rather than raising, so branch on ok — not on line's
+                    # wording, which is prose for the user, not a control signal.
                     occurrence, old_recipe = existing
-                    line = rebuild_child(design, occurrence, old_recipe, snaps,
-                                         slot['matrix'])
-                    if ' — rebuild failed:' in line or ' — cannot rebuild:' in line:
+                    ok, line = rebuild_child(design, occurrence, old_recipe, snaps,
+                                             slot['matrix'])
+                    if not ok:
                         # The geometry may be in a bad state: do not stamp a new
                         # recipe over it or touch the box below. Leave the last
                         # known-good recipe in place for the user to inspect.
                         failures.append(line)
                         continue
-                    report.append(line)
+                    # The base feature's PHYSICAL body order after the swap is
+                    # not necessarily new_names' order: an 'add' always lands at
+                    # the tail of the real collection, wherever pair_bodies
+                    # happened to list it within new_names. Recording new_names
+                    # here instead would corrupt the NEXT rebuild's pairing
+                    # silently — no exception, no failure line — because that
+                    # rebuild's old_index values would then point at whatever
+                    # body actually sits at each position, not the one the
+                    # recipe claims.
+                    body_names = placeholder_core.resulting_body_names(
+                        old_recipe['bodies'], new_names,
+                        placeholder_core.pair_bodies(old_recipe['bodies'], new_names))
                 else:
                     matrix = adsk.core.Matrix3D.create()
                     matrix.setWithArray(slot['matrix'])
@@ -960,7 +987,11 @@ def build_children(slots, mother, config):
                     occurrence.component.name = _unique_component_name(root, slot['name'])
                     build_engine.add_snapshot(occurrence.component, snaps)
                     build_engine.reapply_looks(design, occurrence.component, snaps)
-                    report.append('{} — built {} bodies'.format(slot['name'], len(snaps)))
+                    # A brand-new component starts empty, so snaps order IS
+                    # collection order — no reordering to account for here,
+                    # unlike the rebuild branch above.
+                    body_names = new_names
+                    line = '{} — built {} bodies'.format(slot['name'], len(snaps))
 
                 recipe = placeholder_core.new_child_recipe(
                     slot_id=slot['slotId'],
@@ -968,7 +999,7 @@ def build_children(slots, mother, config):
                             'version': version},
                     config=config, sheet_url=rows_url, tab=mother['tab'],
                     dims_cm=slot['dims_cm'],
-                    bodies=[s['name'] for s in snaps],
+                    bodies=body_names,
                     built_at=built_at)
                 occurrence.component.attributes.add(
                     placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
@@ -979,6 +1010,13 @@ def build_children(slots, mother, config):
                         body.isLightBulbOn = False
                     except Exception:
                         pass
+                # Appended only now, after every step that could still throw and
+                # leave the child half-updated — so a slot never ends up with
+                # both a "built"/"rebuilt" line and a failure line in the same
+                # report (I5): if the recipe write or box hide above throws, the
+                # except block below records the failure and this line, having
+                # never been appended, does not also claim success.
+                report.append(line)
             except Exception as err:
                 # Only ever delete an occurrence THIS iteration created. An
                 # already-filled slot's occurrence pre-dates this run — deleting
