@@ -331,9 +331,25 @@ def _mother_options(design):
             setup = read_mother_setup(other)
             if placeholder_core.validate_mother_setup(setup):
                 continue
+            sheet_url = _own_sheet_url(other)
+            # A multi-tab config sheet's rows live on whatever tab the user
+            # pinned for it in the Build dialog — an empty tab makes
+            # get_rows() fall through to the CSV export of the sheet's FIRST
+            # tab (I6), which can be a completely different table.
+            spreadsheet_id = sheet_core.extract_spreadsheet_id(sheet_url)
+            tab = (SheetVariants.load_pinned_tab(settings, spreadsheet_id)
+                   if spreadsheet_id else '')
+            if not tab:
+                # Nothing pinned for THIS sheet (never "Load tabs"-ed in the
+                # Build dialog, or a single-tab/CSV link with no tabs to pin)
+                # must not blank out a tab this mother was already known to
+                # use — keep whatever the cache above already has for it
+                # rather than stomping a real value with ''.
+                cached = options.get(doc.dataFile.id)
+                tab = cached['tab'] if cached else ''
             options[doc.dataFile.id] = {
                 'fileId': doc.dataFile.id, 'name': doc.name,
-                'sheetUrl': _own_sheet_url(other), 'tab': ''}
+                'sheetUrl': sheet_url, 'tab': tab}
         except Exception:
             continue
     return sorted(options.values(), key=lambda m: m['name'])
@@ -346,6 +362,13 @@ def _mother_options(design):
 # (matching by name, as an earlier version did, resolves to whichever one
 # _mother_options happens to sort first).
 _mother_cache = []
+
+# fileIds this add-in has driven and RESTORED CLEANLY (unrestored_values() came
+# back empty every time) at least once in this Fusion session. See _open_mother
+# for why this exists: Fusion's isModified flag cannot by itself distinguish
+# the user's own unsaved work from dirt a drive-then-restore cycle leaves
+# behind even when every parameter came back exactly as captured.
+_cleanly_restored_file_ids = set()
 
 
 class FillCreatedHandler(adsk.core.CommandCreatedEventHandler):
@@ -422,12 +445,22 @@ class FillInputChangedHandler(adsk.core.InputChangedEventHandler):
         try:
             inputs = args.inputs
             changed = args.input
+            if not inputs.itemById('mother'):
+                return  # dialog stopped at "no prepared mother"; nothing built yet
             if changed.id == 'faces':
                 selection = inputs.itemById('faces')
                 faces = [selection.selection(i).entity
                          for i in range(selection.selectionCount)]
                 slots, problems = resolve_slots(faces)
                 inputs.itemById('report').formattedText = _describe(slots, problems)
+            elif changed.id == 'mother':
+                # A different mother's configs do not apply to whatever was
+                # picked before — reset to the sentinel so OK cannot silently
+                # build the new mother against a config that only happens to
+                # share a name with one of its rows (I3).
+                config = inputs.itemById('config')
+                config.listItems.clear()
+                config.listItems.add('— press Load configs —', True)
             elif changed.id == 'loadConfigs' and changed.value:
                 changed.value = False
                 mother = _selected_mother(inputs)
@@ -446,8 +479,12 @@ class FillInputChangedHandler(adsk.core.InputChangedEventHandler):
                         config.listItems.add(name, config.listItems.count == 0)
                 if not config.listItems.count:
                     config.listItems.add('— no named rows —', True)
+        except RuntimeError as err:
+            # Sheet-reading failures (network, sharing, format) carry a
+            # carefully worded, user-actionable message — show it plainly
+            # rather than wrapped in a stack trace (I4).
+            ui.messageBox(str(err))
         except Exception:
-            import traceback
             ui.messageBox('Fill Placeholders failed:\n' + traceback.format_exc())
 
 
@@ -455,15 +492,20 @@ class FillExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         try:
             inputs = args.firingEvent.sender.commandInputs
+            if not inputs.itemById('mother'):
+                return  # dialog stopped at "no prepared mother"; nothing built yet
             selection = inputs.itemById('faces')
-            if not selection:
-                return
             faces = [selection.selection(i).entity
                      for i in range(selection.selectionCount)]
             slots, problems = resolve_slots(faces)
             mother = _selected_mother(inputs)
             item = inputs.itemById('config').selectedItem
-            config = item.name if item else ''
+            # A placeholder label ("— press Load configs —", "— no named
+            # rows —") is a real, selectable list item and therefore truthy —
+            # exclude it explicitly rather than let it through as a config
+            # name _row_values then can't find (I3). Same idiom as
+            # SheetVariants.py's tab/testRow dropdowns.
+            config = item.name if item and not item.name.startswith('—') else ''
             if not mother or not config:
                 ui.messageBox('Pick a mother model and a config first.')
                 return
@@ -475,8 +517,13 @@ class FillExecuteHandler(adsk.core.CommandEventHandler):
             sheet_core.save_settings(SheetVariants.SETTINGS_FILE, settings)
             lines = report + ['! ' + p for p in problems]
             ui.messageBox('\n'.join(lines) if lines else 'Nothing was built.')
+        except RuntimeError as err:
+            # build_children raises RuntimeError for whole-run preconditions
+            # ("unsaved changes", "not fully prepared", a stale config, a
+            # column that maps to no parameter) with a message already
+            # written for the user — show it plainly, not as a traceback (I4).
+            ui.messageBox(str(err))
         except Exception:
-            import traceback
             ui.messageBox('Fill Placeholders failed:\n' + traceback.format_exc())
 
 
@@ -568,34 +615,70 @@ def find_slot_bodies(design):
 
 
 def find_children(design):
-    """{slot id: (occurrence, recipe)} for every child in ``design``.
+    """(``{slot id: (occurrence, recipe)}``, ``{slot id: message}``) for every
+    child in ``design`` — the second dict is slots whose child was found but
+    cannot be rebuilt because it has been moved out of the top level.
 
     findAttributes returns the whole set in one call, so no occurrence tree is
-    walked. The attribute is written on the component, so its occurrence is found
-    by matching component names against the root's occurrences. Both loops guard
-    per-item, matching find_slot_bodies' pattern: one dead occurrence or one
-    unreadable attribute must not collapse this whole lookup to {}, which would
-    read every already-filled slot as unfilled and duplicate it instead of
-    rebuilding it in place.
+    walked for that part. The attribute is written on the component, so its
+    occurrence is found by matching component names against the root's DIRECT
+    occurrences only — never ``allOccurrences`` (recursive/document-wide):
+    build_children applies ``slot['matrix']``, a WORLD matrix, straight to
+    ``occurrence.transform2``, but a nested occurrence's ``transform2`` is
+    relative to its PARENT occurrence, not world. Resolving through
+    ``allOccurrences`` would silently place a nested child wrongly rather than
+    fail loudly.
+
+    That means a child a designer has grouped into a sub-assembly (e.g. a
+    `Cabinets` component) is invisible to the direct-occurrence lookup even
+    though its recipe attribute is found document-wide. Silently falling
+    through to "unfilled" there would build a SECOND child on top of the
+    first (I8) — so ``allOccurrences`` IS still consulted, but only to tell
+    "exists, just not at the top level" apart from "does not exist at all",
+    and only to produce a clear per-slot failure instead of a silent
+    duplicate.
+
+    Both loops guard per-item, matching find_slot_bodies' pattern: one dead
+    occurrence or one unreadable attribute must not collapse this whole
+    lookup to {}, which would read every already-filled slot as unfilled and
+    duplicate it instead of rebuilding it in place.
     """
     found = {}
+    moved = {}
     by_component = {}
     for occurrence in design.rootComponent.occurrences:
         try:
             by_component.setdefault(occurrence.component.name, occurrence)
         except Exception:
             continue
+    nested_names = None  # computed lazily: only needed when a name misses above
     for attribute in attribute_list(design.findAttributes(
             placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR)):
         try:
             recipe = placeholder_core.loads_attr(attribute.value,
                                                  placeholder_core.migrate_child_recipe)
-            occurrence = by_component.get(attribute.parent.name)
+            component_name = attribute.parent.name
         except Exception:
             continue
-        if occurrence and recipe['slotId']:
+        if not recipe['slotId']:
+            continue
+        occurrence = by_component.get(component_name)
+        if occurrence:
             found[recipe['slotId']] = (occurrence, recipe)
-    return found
+            continue
+        if nested_names is None:
+            nested_names = set()
+            for occ in design.rootComponent.allOccurrences:
+                try:
+                    nested_names.add(occ.component.name)
+                except Exception:
+                    continue
+        if component_name in nested_names:
+            moved[recipe['slotId']] = (
+                'its child "{}" has been moved into a sub-assembly — move it '
+                'back to the top level of the design to rebuild it'
+                .format(component_name))
+    return found, moved
 
 
 def rebuild_child(design, occurrence, recipe, snaps, matrix16):
@@ -619,7 +702,15 @@ def rebuild_child(design, occurrence, recipe, snaps, matrix16):
     failure = build_engine.rebuild_base_feature(component, base, snaps, ops)
     if failure:
         return False, '{} — rebuild failed: {}'.format(component.name, failure)
-    build_engine.reapply_looks(design, component, snaps)
+    # reapply_looks pairs component.bRepBodies.item(i) with snaps[i] positionally
+    # (its contract, unchanged — build_exports' fresh-build path depends on it,
+    # and there snaps order IS collection order). On THIS path it is not: an
+    # 'add' in ops always lands at the tail of the physical collection, not at
+    # wherever pair_bodies happened to list it within snaps (see
+    # resulting_body_names). Reorder snaps into that physical order first, or a
+    # body ends up wearing a sibling's material/appearance (I1).
+    physical_snaps = placeholder_core.resulting_snap_order(recipe['bodies'], snaps, ops)
+    build_engine.reapply_looks(design, component, physical_snaps)
     matrix = adsk.core.Matrix3D.create()
     matrix.setWithArray(matrix16)
     occurrence.transform2 = matrix
@@ -679,7 +770,27 @@ def _open_mother(file_id):
             # abort Fill entirely.
             continue
         if data_file and data_file.id == file_id:
-            if doc.isModified:
+            if doc.isModified and file_id not in _cleanly_restored_file_ids:
+                # isModified alone cannot tell the user's unsaved work apart
+                # from dirt THIS add-in's own drive-then-restore cycle left
+                # behind: restore_values() writes every driven parameter's
+                # expression back exactly as captured, but Fusion still marks
+                # the document modified because a write happened — not
+                # because anything about the model actually changed. Refusing
+                # unconditionally would trip on the very first Fill run after
+                # Prepare (which itself writes a document attribute), or on a
+                # second Fill in the same session after a first one drove and
+                # cleanly restored the mother. And "just save it" is bad
+                # advice here: saving mints a new cloud version of a
+                # geometrically unchanged mother, staling every child already
+                # built off the current one (I5).
+                #
+                # So a fileId only ever enters _cleanly_restored_file_ids once
+                # build_children has driven it and confirmed EVERY restore
+                # came back clean (see the unrestored_names check there) — a
+                # genuinely dirty document still refuses the first time in a
+                # session, and a run whose restore did NOT come back clean
+                # never gets added, so the next attempt keeps refusing too.
                 raise RuntimeError(
                     'The mother "{}" has unsaved changes. Save or discard them '
                     'before filling placeholders.'.format(doc.name))
@@ -877,6 +988,13 @@ def build_children(slots, mother, config):
                 'a driven value still applied. Close it WITHOUT SAVING — '
                 'saving now would make that value permanent.'
                 .format(', '.join(sorted(unrestored_names)), mother['name']))
+        else:
+            # Every value driven in this run came back exactly as captured —
+            # any "modified" flag Fusion now shows on this mother is dirt this
+            # add-in's own drive-and-restore left behind, not unsaved user
+            # work. Let _open_mother's isModified check trust that for the
+            # rest of this session (I5).
+            _cleanly_restored_file_ids.add(mother['fileId'])
 
         # Phase 2 — back in the layout, but the mother is STILL OPEN: its
         # Appearance/Material objects, referenced live from the snapshots in
@@ -906,9 +1024,9 @@ def build_children(slots, mother, config):
         # and built fresh below, at the cost of possibly duplicating a child
         # that already exists.
         try:
-            children = find_children(design)
+            children, moved_children = find_children(design)
         except Exception as err:
-            children = {}
+            children, moved_children = {}, {}
             failures.append('Could not look up already-filled slots ({}); any '
                             'that exist will be duplicated instead of rebuilt.'
                             .format(err))
@@ -930,6 +1048,13 @@ def build_children(slots, mother, config):
                 failures.append('{} — no slot id was stamped, so its recipe '
                                 'would not be usable later; skipped.'
                                 .format(slot['name']))
+                continue
+            if slot['slotId'] in moved_children:
+                # Better a clear refusal than the silent duplicate building it
+                # fresh below would create (I8): its recipe attribute exists,
+                # so it is NOT unfilled, but find_children could not resolve
+                # it to a top-level occurrence it can safely rebuild.
+                failures.append('{} — {}.'.format(slot['name'], moved_children[slot['slotId']]))
                 continue
 
             # Phase 2 is isolated per slot: an occurrence is only ever left

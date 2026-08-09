@@ -1014,7 +1014,8 @@ def cleanup_ui():
     except Exception:
         pass
 
-    cmd_ids = (CMD_ID, TEST_CMD_ID, TEMPLATE_CMD_ID)
+    cmd_ids = (CMD_ID, TEST_CMD_ID, TEMPLATE_CMD_ID,
+               placeholder_cmds.PREPARE_CMD_ID, placeholder_cmds.FILL_CMD_ID)
     panel_ids = (PANEL_ID,) + OBSOLETE_PANEL_IDS
 
     try:

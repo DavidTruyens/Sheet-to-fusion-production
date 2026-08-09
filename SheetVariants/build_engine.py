@@ -189,11 +189,10 @@ def transform_snapshot(snaps, matrix16):
         tbm.transform(snap['temp'], matrix)
 
 
-def add_snapshot(component, snaps, base=None):
-    """Add snapshotted bodies to ``component`` inside a base feature, creating one
-    if not supplied. Returns the base feature."""
-    if base is None:
-        base = component.features.baseFeatures.add()
+def add_snapshot(component, snaps):
+    """Add snapshotted bodies to ``component`` inside a new base feature. Returns
+    the base feature."""
+    base = component.features.baseFeatures.add()
     base.startEdit()
     try:
         for snap in snaps:

@@ -228,10 +228,18 @@ to the new geometry at full depth, whatever size the box changed to.
 
 A fillet or chamfer on a generated edge, or a sketch on a generated face, does not
 survive — that edge or face is gone once the shape changes. It's **reported, not
-silent**: the child comes back as `rebuild failed` rather than half-updated, and its
-geometry is left exactly as it was before the attempt, so you can just fill it
-again. One fragile feature costs you that one cabinet, not the kitchen — everything
-else in the run still updates.
+silent**: the child comes back as `rebuild failed`. By then the geometry swap has
+already happened, so this is not a no-op — the downstream feature that couldn't
+recompute is destroyed, and the child can be left in a bad, half-updated state
+rather than untouched. Re-running **Fill Placeholders** on it is the recovery: it
+drives a fresh rebuild rather than trying to repair the half-built one. One
+fragile feature costs you that one cabinet, not the kitchen — everything else in
+the run still updates.
+
+A child that has been moved into a sub-assembly (grouped under another component,
+the way step 2 suggests doing for boxes) can't be found for a rebuild either — Fill
+Placeholders reports that slot as unrebuildable rather than silently building a
+duplicate on top of it. Keep a filled child at the top level of the design.
 
 ## How the Google connection works
 

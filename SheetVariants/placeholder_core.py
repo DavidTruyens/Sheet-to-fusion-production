@@ -340,3 +340,32 @@ def resulting_body_names(old_names, new_names, ops):
     survivors = [name for i, name in enumerate(working) if i not in removed]
     adds = [new_names[new_index] for kind, _, new_index in ops if kind == 'add']
     return survivors + adds
+
+
+def resulting_snap_order(old_names, new_items, ops):
+    """``new_items`` (parallel to the ``new_names`` passed into ``pair_bodies``)
+    reordered into the PHYSICAL order ``ops`` leaves the real Fusion collection
+    in — the exact same reordering ``resulting_body_names`` performs on the
+    names themselves, kept as a separate function because a caller (reapplying
+    a material/appearance per body) needs the object that goes WITH each name,
+    not just the name string ``resulting_body_names`` returns.
+
+    Re-deriving that mapping by matching ``resulting_body_names``' output back
+    onto ``new_items`` by name would have to re-disambiguate duplicate
+    qualified names a second time; working from ``ops`` directly needs no such
+    step, because each op's ``new_index`` already identifies the exact item —
+    it is the same index ``pair_bodies`` used to build ``new_names`` in the
+    first place.
+
+    See ``resulting_body_names`` for why the physical order differs from
+    ``new_items``'s order at all: an 'add' always lands at the tail of the
+    live collection, never at its ``new_index`` position.
+    """
+    working = [None] * len(old_names or [])
+    for kind, old_index, new_index in ops:
+        if kind == 'update':
+            working[old_index] = new_items[new_index]
+    removed = {old_index for kind, old_index, _ in ops if kind == 'remove'}
+    survivors = [item for i, item in enumerate(working) if i not in removed]
+    adds = [new_items[new_index] for kind, _, new_index in ops if kind == 'add']
+    return survivors + adds
