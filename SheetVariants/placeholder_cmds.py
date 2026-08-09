@@ -213,6 +213,29 @@ def _body_vertices(body):
     return out
 
 
+def _body_identity(body):
+    """A stable identity for ``body``, for deduplicating repeated selections.
+
+    Prefers Fusion's persistent ``entityToken`` — unlike ``body.name``, which is
+    mutable and not unique, so two distinct bodies sharing a name (renamed, or
+    copy-pasted across components) would otherwise be wrongly collapsed into
+    "one box", silently dropping one of the user's selected placeholders. Falls
+    back to the qualified component::body name if the token is unavailable or
+    empty.
+    """
+    try:
+        token = body.entityToken
+        if token:
+            return token
+    except Exception:
+        pass
+    try:
+        component_name = body.parentComponent.name
+    except Exception:
+        component_name = ''
+    return placeholder_core.qualified_body_name(component_name, body.name)
+
+
 def read_slot_id(body):
     try:
         attr = body.attributes.itemByName(placeholder_core.ATTR_GROUP,
@@ -245,7 +268,8 @@ def resolve_slots(faces):
     for face in faces:
         body = face.body
         name = body.name
-        if name in seen:
+        key = _body_identity(body)
+        if key in seen:
             problems.append('"{}" was selected more than once — using the first '
                             'face only.'.format(name))
             continue
@@ -254,10 +278,10 @@ def resolve_slots(faces):
             frame = placeholder_core.target_frame((normal.x, normal.y, normal.z))
             width, depth, height, centre = placeholder_core.extents_in_frame(
                 _body_vertices(body), frame)
-        except ValueError as err:
+        except Exception as err:
             problems.append('"{}": {}'.format(name, err))
             continue
-        seen.add(name)
+        seen.add(key)
         slots.append({
             'body': body,
             'slotId': read_slot_id(body),
@@ -266,6 +290,25 @@ def resolve_slots(faces):
             'name': name,
         })
     return slots, problems
+
+
+def _own_sheet_url(design):
+    """This design's own linked-sheet URL, with NO fallback.
+
+    Deliberately does not use ``SheetVariants.load_design_url`` — that function
+    falls back to the app-level last-used sheet URL when the design has no
+    attribute of its own, which here would let an unrelated document's
+    last-used sheet masquerade as this mother's link: a never-linked mother
+    would silently report a non-empty sheetUrl, skipping the "no sheet link
+    yet" warning and then loading configs from the wrong spreadsheet.
+    """
+    try:
+        import SheetVariants
+        attr = design.attributes.itemByName(SheetVariants.DESIGN_ATTR_GROUP,
+                                            SheetVariants.DESIGN_ATTR_URL)
+        return attr.value if attr else ''
+    except Exception:
+        return ''
 
 
 def _mother_options(design):
@@ -287,61 +330,77 @@ def _mother_options(design):
                 continue
             options[doc.dataFile.id] = {
                 'fileId': doc.dataFile.id, 'name': doc.name,
-                'sheetUrl': SheetVariants.load_design_url(other), 'tab': ''}
+                'sheetUrl': _own_sheet_url(other), 'tab': ''}
         except Exception:
             continue
     return sorted(options.values(), key=lambda m: m['name'])
 
 
+# Populated by FillCreatedHandler.notify, in the exact order the mother
+# dropdown's items are added, so _selected_mother can index into it directly:
+# no re-reading settings.json / re-scanning every open document on every
+# dropdown interaction, and no ambiguity when two mothers share a display name
+# (matching by name, as an earlier version did, resolves to whichever one
+# _mother_options happens to sort first).
+_mother_cache = []
+
+
 class FillCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
-        cmd = args.command
-        inputs = cmd.commandInputs
-        design = adsk.fusion.Design.cast(app.activeProduct)
-        if not design:
-            inputs.addTextBoxCommandInput('err', '', 'Open a design first.', 2, True)
-            return
+        try:
+            cmd = args.command
+            inputs = cmd.commandInputs
+            design = adsk.fusion.Design.cast(app.activeProduct)
+            if not design:
+                inputs.addTextBoxCommandInput('err', '', 'Open a design first.', 2, True)
+                return
 
-        selection = inputs.addSelectionInput(
-            'faces', 'Front faces', 'Select the front face of each placeholder box')
-        selection.addSelectionFilter('PlanarFaces')
-        selection.setSelectionLimits(1, 0)
+            selection = inputs.addSelectionInput(
+                'faces', 'Front faces', 'Select the front face of each placeholder box')
+            selection.addSelectionFilter('PlanarFaces')
+            selection.setSelectionLimits(1, 0)
 
-        mothers = _mother_options(design)
-        if not mothers:
-            inputs.addTextBoxCommandInput(
-                'nomother', '',
-                'No prepared mother models found. Open one and run Prepare Mother '
-                'Model first.', 3, True)
-            return
-        drop = inputs.addDropDownCommandInput(
-            'mother', 'Mother model', adsk.core.DropDownStyles.TextListDropDownStyle)
-        for index, mother in enumerate(mothers):
-            drop.listItems.add(mother['name'], index == 0)
+            global _mother_cache
+            mothers = _mother_options(design)
+            _mother_cache = mothers
+            if not mothers:
+                inputs.addTextBoxCommandInput(
+                    'nomother', '',
+                    'No prepared mother models found. Open one and run Prepare Mother '
+                    'Model first.', 3, True)
+                return
+            drop = inputs.addDropDownCommandInput(
+                'mother', 'Mother model', adsk.core.DropDownStyles.TextListDropDownStyle)
+            for index, mother in enumerate(mothers):
+                drop.listItems.add(mother['name'], index == 0)
 
-        config = inputs.addDropDownCommandInput(
-            'config', 'Config', adsk.core.DropDownStyles.TextListDropDownStyle)
-        config.listItems.add('— press Load configs —', True)
-        inputs.addBoolValueInput('loadConfigs', 'Load configs', False, '', False)
-        inputs.addTextBoxCommandInput('report', 'Resolved', '', 6, True)
+            config = inputs.addDropDownCommandInput(
+                'config', 'Config', adsk.core.DropDownStyles.TextListDropDownStyle)
+            config.listItems.add('— press Load configs —', True)
+            inputs.addBoolValueInput('loadConfigs', 'Load configs', False, '', False)
+            inputs.addTextBoxCommandInput('report', 'Resolved', '', 6, True)
 
-        for handler_class, event in ((FillInputChangedHandler, cmd.inputChanged),
-                                     (FillExecuteHandler, cmd.execute)):
-            handler = handler_class()
-            event.add(handler)
-            _handlers.append(handler)
+            for handler_class, event in ((FillInputChangedHandler, cmd.inputChanged),
+                                         (FillExecuteHandler, cmd.execute)):
+                handler = handler_class()
+                event.add(handler)
+                _handlers.append(handler)
 
-        cmd.setDialogInitialSize(460, 460)
+            cmd.setDialogInitialSize(460, 460)
+        except Exception:
+            if ui:
+                ui.messageBox('Fill Placeholders failed:\n' + traceback.format_exc())
 
 
 def _selected_mother(inputs):
-    item = inputs.itemById('mother').selectedItem if inputs.itemById('mother') else None
-    if not item:
+    """The currently chosen mother, indexed out of ``_mother_cache`` by the
+    dropdown's selected position rather than matched by display name (see
+    ``_mother_cache``'s comment)."""
+    drop = inputs.itemById('mother')
+    item = drop.selectedItem if drop else None
+    if not item or item.index < 0 or item.index >= len(_mother_cache):
         return None
-    for mother in _mother_options(adsk.fusion.Design.cast(app.activeProduct)):
-        if mother['name'] == item.name:
-            return mother
-    return None
+    return _mother_cache[item.index]
 
 
 def _describe(slots, problems):

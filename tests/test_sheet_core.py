@@ -322,6 +322,10 @@ def test_validate_comma_decimal_is_error_with_cell_ref():
 def test_known_mothers_defaults_to_empty():
     assert sheet_core.known_mothers({}) == []
     assert sheet_core.known_mothers({"mothers": "nonsense"}) == []
+    # A bare dict (not a list of dicts) must be rejected outright, not treated
+    # as a single implicit entry — genuinely exercises the isinstance(list)
+    # guard rather than being caught incidentally by the per-entry dict check.
+    assert sheet_core.known_mothers({"mothers": {"fileId": "urn:a"}}) == []
 
 
 def test_remember_mother_adds_an_entry():
@@ -347,6 +351,10 @@ def test_remember_mother_ignores_an_entry_with_no_file_id():
     s = {}
     sheet_core.remember_mother(s, {"name": "x.f3d"})
     assert sheet_core.known_mothers(s) == []
+    # Assert against the raw settings dict too: known_mothers' own filtering
+    # would otherwise mask remember_mother leaking a junk {"fileId": "", ...}
+    # row into settings["mothers"] permanently.
+    assert s.get("mothers") is None
 
 
 def test_validate_missing_name_header_is_error():
