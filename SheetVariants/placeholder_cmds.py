@@ -7,6 +7,7 @@
 
 import os
 import sys
+import traceback
 
 import adsk.core
 import adsk.fusion
@@ -65,65 +66,99 @@ def joint_origin_names(design):
 
 
 def _add_dropdown(inputs, input_id, label, options, selected):
-    """A single-select dropdown pre-set to ``selected`` when it is present."""
+    """A single-select dropdown pre-set to ``selected`` when it is present.
+
+    Returns ``(drop, matched)``. ``matched`` is False when ``selected`` was a
+    non-empty stored value that is no longer among ``options`` — e.g. the
+    parameter or joint origin it named was renamed or deleted. In that case the
+    dropdown still falls back to selecting the first item (it must select
+    something), but that fallback is visually indistinguishable from a real,
+    intentional selection, so the caller uses ``matched`` to warn the user
+    instead of silently writing the wrong mapping back out."""
     drop = inputs.addDropDownCommandInput(
         input_id, label, adsk.core.DropDownStyles.TextListDropDownStyle)
     for option in options:
         drop.listItems.add(option, option == selected)
+    matched = (not selected) or (selected in options)
     if drop.listItems.count and not drop.selectedItem:
         drop.listItems.item(0).isSelected = True
-    return drop
+    return drop, matched
 
 
 class PrepareCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
-        cmd = args.command
-        inputs = cmd.commandInputs
-        design = adsk.fusion.Design.cast(app.activeProduct)
-        if not design:
+        try:
+            cmd = args.command
+            inputs = cmd.commandInputs
+            design = adsk.fusion.Design.cast(app.activeProduct)
+            if not design:
+                inputs.addTextBoxCommandInput(
+                    'err', '', 'Open a parametric design first.', 2, True)
+                return
+
+            # Without a saved file there is no id to reference and no version
+            # number to compare, so a child could never say whether its mother
+            # had moved on.
+            if not design.parentDocument.dataFile:
+                inputs.addTextBoxCommandInput(
+                    'err', '',
+                    'Save this document to your Fusion project first — a mother '
+                    'model must be a saved file so children can reference it and '
+                    'compare versions.', 4, True)
+                return
+
+            setup = read_mother_setup(design)
+            origins = joint_origin_names(design)
+            if not origins:
+                inputs.addTextBoxCommandInput(
+                    'err', '',
+                    'This model has no joint origins. Create one at the point '
+                    'that should land at the centre of a placeholder box '
+                    '(Assemble > Joint Origin), then run this command again.',
+                    4, True)
+                return
+
+            params = [p.name for p in design.allParameters]
+            missing = []
+            _, matched = _add_dropdown(inputs, 'anchor', 'Anchor joint origin',
+                                       origins, setup['anchor'])
+            if not matched:
+                missing.append('anchor')
+            _add_dropdown(inputs, 'front', 'Front faces along',
+                          list(placeholder_core.FRONT_AXES), setup['front'])
+            _, matched = _add_dropdown(inputs, 'pWidth', 'Width parameter', params,
+                                       setup['params']['width'])
+            if not matched:
+                missing.append('width')
+            _, matched = _add_dropdown(inputs, 'pDepth', 'Depth parameter', params,
+                                       setup['params']['depth'])
+            if not matched:
+                missing.append('depth')
+            _, matched = _add_dropdown(inputs, 'pHeight', 'Height parameter', params,
+                                       setup['params']['height'])
+            if not matched:
+                missing.append('height')
+
+            if missing:
+                inputs.addTextBoxCommandInput(
+                    'missing', '',
+                    'Previously saved selections no longer exist in this model '
+                    'and have been reset: {}. Check every dropdown before '
+                    'clicking OK.'.format(', '.join(missing)),
+                    3, True)
             inputs.addTextBoxCommandInput(
-                'err', '', 'Open a parametric design first.', 2, True)
-            return
+                'hint', '',
+                'The anchor is the point that lands at the centre of the '
+                'placeholder box. To shift the model within its box, move the '
+                'joint origin.',
+                3, True)
 
-        # Without a saved file there is no id to reference and no version number
-        # to compare, so a child could never say whether its mother had moved on.
-        if not design.parentDocument.dataFile:
-            inputs.addTextBoxCommandInput(
-                'err', '',
-                'Save this document to your Fusion project first — a mother model '
-                'must be a saved file so children can reference it and compare '
-                'versions.', 4, True)
-            return
-
-        setup = read_mother_setup(design)
-        origins = joint_origin_names(design)
-        if not origins:
-            inputs.addTextBoxCommandInput(
-                'err', '',
-                'This model has no joint origins. Create one at the point that '
-                'should land at the centre of a placeholder box (Assemble > Joint '
-                'Origin), then run this command again.', 4, True)
-            return
-
-        params = [p.name for p in design.allParameters]
-        _add_dropdown(inputs, 'anchor', 'Anchor joint origin', origins, setup['anchor'])
-        _add_dropdown(inputs, 'front', 'Front faces along',
-                      list(placeholder_core.FRONT_AXES), setup['front'])
-        _add_dropdown(inputs, 'pWidth', 'Width parameter', params,
-                      setup['params']['width'])
-        _add_dropdown(inputs, 'pDepth', 'Depth parameter', params,
-                      setup['params']['depth'])
-        _add_dropdown(inputs, 'pHeight', 'Height parameter', params,
-                      setup['params']['height'])
-        inputs.addTextBoxCommandInput(
-            'hint', '',
-            'The anchor is the point that lands at the centre of the placeholder '
-            'box. To shift the model within its box, move the joint origin.',
-            3, True)
-
-        handler = PrepareExecuteHandler()
-        cmd.execute.add(handler)
-        _handlers.append(handler)
+            handler = PrepareExecuteHandler()
+            cmd.execute.add(handler)
+            _handlers.append(handler)
+        except Exception:
+            if ui:
+                ui.messageBox('Prepare Mother Model failed:\n' + traceback.format_exc())
 
 
 class PrepareExecuteHandler(adsk.core.CommandEventHandler):
@@ -158,31 +193,64 @@ class PrepareExecuteHandler(adsk.core.CommandEventHandler):
                         setup['params']['width'], setup['params']['depth'],
                         setup['params']['height']))
         except Exception:
-            import traceback
             ui.messageBox('Prepare Mother Model failed:\n' + traceback.format_exc())
 
 
 _handlers = []
 
+# Panel this module last registered its controls into, so unregister() can find
+# and remove them even if it is not the add-in's own MANAGE panel — get_manage_
+# panel() in SheetVariants.py falls back to the native SolidScriptsAddinsPanel
+# when the MANAGE tab can't be found (e.g. a non-English Fusion), and that panel
+# is never deleted wholesale on reload the way the add-in's own panel is.
+_panel = None
+
+# (cmd_id, name, description, CommandCreatedEventHandler class) for every
+# command this module registers. Task 8 (Fill Placeholders) adds a second
+# tuple here — register() and unregister() both already loop over this.
+_COMMANDS = (
+    (PREPARE_CMD_ID, PREPARE_CMD_NAME, PREPARE_CMD_DESC, PrepareCreatedHandler),
+)
+
 
 def register(panel):
     """Create the command definitions and add them to ``panel``. Handlers are kept
     in this module's _handlers list so Python does not garbage-collect them."""
-    existing = ui.commandDefinitions.itemById(PREPARE_CMD_ID)
-    if existing:
-        existing.deleteMe()
-    definition = ui.commandDefinitions.addButtonDefinition(
-        PREPARE_CMD_ID, PREPARE_CMD_NAME, PREPARE_CMD_DESC)
-    handler = PrepareCreatedHandler()
-    definition.commandCreated.add(handler)
-    _handlers.append(handler)
-    panel.controls.addCommand(definition)
+    global _panel
+    _panel = panel
+    for cmd_id, name, desc, created_handler_cls in _COMMANDS:
+        existing = ui.commandDefinitions.itemById(cmd_id)
+        if existing:
+            existing.deleteMe()
+        definition = ui.commandDefinitions.addButtonDefinition(cmd_id, name, desc)
+        handler = created_handler_cls()
+        definition.commandCreated.add(handler)
+        _handlers.append(handler)
+        if not panel.controls.itemById(cmd_id):
+            panel.controls.addCommand(definition)
 
 
 def unregister():
-    """Remove this module's command definitions and controls."""
-    for cmd_id in (PREPARE_CMD_ID,):
-        definition = ui.commandDefinitions.itemById(cmd_id)
-        if definition:
-            definition.deleteMe()
+    """Remove this module's command controls and definitions. Safe to call
+    repeatedly, and safe even if the panel this module registered into has since
+    been deleted (deleteMe() on a command definition does not remove the panel
+    control that references it, so both are removed here explicitly, each
+    independently guarded so one missing piece cannot stop the other from being
+    cleaned up)."""
+    global _panel
+    for cmd_id, _name, _desc, _cls in _COMMANDS:
+        if _panel:
+            try:
+                control = _panel.controls.itemById(cmd_id)
+                if control:
+                    control.deleteMe()
+            except Exception:
+                pass
+        try:
+            definition = ui.commandDefinitions.itemById(cmd_id)
+            if definition:
+                definition.deleteMe()
+        except Exception:
+            pass
     _handlers[:] = []
+    _panel = None

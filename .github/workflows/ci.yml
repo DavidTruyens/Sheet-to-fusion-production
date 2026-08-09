@@ -15,7 +15,7 @@ jobs:
           python-version: "3.x"
 
       - name: Byte-compile the add-in
-        run: python -m py_compile SheetVariants/SheetVariants.py SheetVariants/build_engine.py
+        run: python -m py_compile SheetVariants/SheetVariants.py SheetVariants/build_engine.py SheetVariants/placeholder_cmds.py
 
       - name: Validate the manifest is valid JSON
         run: python -m json.tool SheetVariants/SheetVariants.manifest > /dev/null
