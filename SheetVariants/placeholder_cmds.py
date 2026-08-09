@@ -1,0 +1,1203 @@
+# placeholder_cmds.py
+# The placeholder-instantiation commands: Prepare Mother Model (records how a
+# mother is driven and oriented) and Fill Placeholders (generates children).
+#
+# Imports adsk, so nothing here is unit-tested; the schemas, frames, extents,
+# matrices and body pairing all live in placeholder_core.py, which is.
+
+import datetime
+import os
+import sys
+import traceback
+
+import adsk.core
+import adsk.fusion
+
+import build_engine
+
+_ADDIN_DIR = os.path.dirname(os.path.realpath(__file__))
+if _ADDIN_DIR not in sys.path:
+    sys.path.insert(0, _ADDIN_DIR)
+sys.modules.pop('placeholder_core', None)
+import placeholder_core
+
+app = adsk.core.Application.get()
+ui = app.userInterface
+
+PREPARE_CMD_ID = 'sheetVariantsPrepareMotherCmd'
+PREPARE_CMD_NAME = 'Prepare Mother Model'
+PREPARE_CMD_DESC = ('Record which parameters this model\'s width, depth and height '
+                    'map to, where its anchor is, and which way it faces — so it '
+                    'can be assigned to placeholder boxes in a layout.')
+
+
+def read_mother_setup(design):
+    """The motherSetup stored on ``design``, migrated. A design that was never
+    prepared yields the default, which validate_mother_setup() will reject with a
+    readable reason."""
+    text = ''
+    try:
+        attr = design.attributes.itemByName(placeholder_core.ATTR_GROUP,
+                                            placeholder_core.MOTHER_SETUP_ATTR)
+        if attr:
+            text = attr.value
+    except Exception:
+        pass
+    return placeholder_core.loads_attr(text, placeholder_core.migrate_mother_setup)
+
+
+def write_mother_setup(design, setup):
+    design.attributes.add(placeholder_core.ATTR_GROUP,
+                          placeholder_core.MOTHER_SETUP_ATTR,
+                          placeholder_core.dumps_attr(setup))
+
+
+def joint_origin_names(design):
+    """Joint origin names in the root component. A joint origin is used as the
+    anchor rather than a face because it is a named entity that survives the
+    parameter changes this feature makes; a face reference would not."""
+    names = []
+    try:
+        origins = design.rootComponent.jointOrgins
+        for i in range(origins.count):
+            name = origins.item(i).name
+            if name:
+                names.append(name)
+    except Exception:
+        pass
+    return names
+
+
+def _add_dropdown(inputs, input_id, label, options, selected):
+    """A single-select dropdown pre-set to ``selected`` when it is present.
+
+    Returns ``(drop, matched)``. ``matched`` is False when ``selected`` was a
+    non-empty stored value that is no longer among ``options`` — e.g. the
+    parameter or joint origin it named was renamed or deleted. In that case the
+    dropdown still falls back to selecting the first item (it must select
+    something), but that fallback is visually indistinguishable from a real,
+    intentional selection, so the caller uses ``matched`` to warn the user
+    instead of silently writing the wrong mapping back out."""
+    drop = inputs.addDropDownCommandInput(
+        input_id, label, adsk.core.DropDownStyles.TextListDropDownStyle)
+    for option in options:
+        drop.listItems.add(option, option == selected)
+    matched = (not selected) or (selected in options)
+    if drop.listItems.count and not drop.selectedItem:
+        drop.listItems.item(0).isSelected = True
+    return drop, matched
+
+
+class PrepareCreatedHandler(adsk.core.CommandCreatedEventHandler):
+    def notify(self, args):
+        try:
+            cmd = args.command
+            inputs = cmd.commandInputs
+            design = adsk.fusion.Design.cast(app.activeProduct)
+            if not design:
+                inputs.addTextBoxCommandInput(
+                    'err', '', 'Open a parametric design first.', 2, True)
+                return
+
+            # Without a saved file there is no id to reference and no version
+            # number to compare, so a child could never say whether its mother
+            # had moved on.
+            if not design.parentDocument.dataFile:
+                inputs.addTextBoxCommandInput(
+                    'err', '',
+                    'Save this document to your Fusion project first — a mother '
+                    'model must be a saved file so children can reference it and '
+                    'compare versions.', 4, True)
+                return
+
+            setup = read_mother_setup(design)
+            origins = joint_origin_names(design)
+            if not origins:
+                inputs.addTextBoxCommandInput(
+                    'err', '',
+                    'This model has no joint origins. Create one at the point '
+                    'that should land at the centre of a placeholder box '
+                    '(Assemble > Joint Origin), then run this command again.',
+                    4, True)
+                return
+
+            params = [p.name for p in design.allParameters]
+            missing = []
+            _, matched = _add_dropdown(inputs, 'anchor', 'Anchor joint origin',
+                                       origins, setup['anchor'])
+            if not matched:
+                missing.append('anchor')
+            _add_dropdown(inputs, 'front', 'Front faces along',
+                          list(placeholder_core.FRONT_AXES), setup['front'])
+            _, matched = _add_dropdown(inputs, 'pWidth', 'Width parameter', params,
+                                       setup['params']['width'])
+            if not matched:
+                missing.append('width')
+            _, matched = _add_dropdown(inputs, 'pDepth', 'Depth parameter', params,
+                                       setup['params']['depth'])
+            if not matched:
+                missing.append('depth')
+            _, matched = _add_dropdown(inputs, 'pHeight', 'Height parameter', params,
+                                       setup['params']['height'])
+            if not matched:
+                missing.append('height')
+
+            if missing:
+                inputs.addTextBoxCommandInput(
+                    'missing', '',
+                    'Previously saved selections no longer exist in this model '
+                    'and have been reset: {}. Check every dropdown before '
+                    'clicking OK.'.format(', '.join(missing)),
+                    3, True)
+            inputs.addTextBoxCommandInput(
+                'hint', '',
+                'The anchor is the point that lands at the centre of the '
+                'placeholder box. To shift the model within its box, move the '
+                'joint origin.',
+                3, True)
+
+            handler = PrepareExecuteHandler()
+            cmd.execute.add(handler)
+            _handlers.append(handler)
+        except Exception:
+            if ui:
+                ui.messageBox('Prepare Mother Model failed:\n' + traceback.format_exc())
+
+
+class PrepareExecuteHandler(adsk.core.CommandEventHandler):
+    def notify(self, args):
+        try:
+            inputs = args.firingEvent.sender.commandInputs
+            if not inputs.itemById('anchor'):
+                return  # an error text box was shown instead of the form
+            design = adsk.fusion.Design.cast(app.activeProduct)
+
+            def picked(input_id):
+                item = inputs.itemById(input_id).selectedItem
+                return item.name if item else ''
+
+            setup = placeholder_core.migrate_mother_setup({
+                'anchor': picked('anchor'),
+                'front': picked('front'),
+                'params': {'width': picked('pWidth'),
+                           'depth': picked('pDepth'),
+                           'height': picked('pHeight')},
+            })
+            errors = placeholder_core.validate_mother_setup(setup)
+            if errors:
+                ui.messageBox('This mother cannot be used yet:\n\n• '
+                              + '\n• '.join(errors))
+                return
+            write_mother_setup(design, setup)
+            ui.messageBox(
+                'Prepared "{}".\n\nanchor: {}\nfront: {}\nwidth: {}\ndepth: {}\n'
+                'height: {}\n\nSave the document to keep this.'
+                .format(design.parentDocument.name, setup['anchor'], setup['front'],
+                        setup['params']['width'], setup['params']['depth'],
+                        setup['params']['height']))
+        except Exception:
+            ui.messageBox('Prepare Mother Model failed:\n' + traceback.format_exc())
+
+
+FILL_CMD_ID = 'sheetVariantsFillPlaceholdersCmd'
+FILL_CMD_NAME = 'Fill Placeholders'
+FILL_CMD_DESC = ('Assign a prepared mother model, at a chosen config, to the '
+                 'selected placeholder boxes. Each box drives its own width, '
+                 'depth and height.')
+
+
+def _body_vertices(body):
+    """World (x, y, z) of every vertex of ``body``, in centimetres."""
+    verts = body.vertices
+    out = []
+    for i in range(verts.count):
+        point = verts.item(i).geometry
+        out.append((point.x, point.y, point.z))
+    return out
+
+
+def _body_identity(body):
+    """A stable identity for ``body``, for deduplicating repeated selections.
+
+    Prefers Fusion's persistent ``entityToken`` — unlike ``body.name``, which is
+    mutable and not unique, so two distinct bodies sharing a name (renamed, or
+    copy-pasted across components) would otherwise be wrongly collapsed into
+    "one box", silently dropping one of the user's selected placeholders. Falls
+    back to the qualified component::body name if the token is unavailable or
+    empty.
+    """
+    try:
+        token = body.entityToken
+        if token:
+            return token
+    except Exception:
+        pass
+    try:
+        component_name = body.parentComponent.name
+    except Exception:
+        component_name = ''
+    return placeholder_core.qualified_body_name(component_name, body.name)
+
+
+def read_slot_id(body):
+    try:
+        attr = body.attributes.itemByName(placeholder_core.ATTR_GROUP,
+                                          placeholder_core.SLOT_ID_ATTR)
+        return attr.value if attr else ''
+    except Exception:
+        return ''
+
+
+def ensure_slot_id(body):
+    """This body's slot id, stamping a new one the first time it is filled."""
+    existing = read_slot_id(body)
+    if existing:
+        return existing
+    slot_id = placeholder_core.new_slot_id()
+    body.attributes.add(placeholder_core.ATTR_GROUP,
+                        placeholder_core.SLOT_ID_ATTR, slot_id)
+    return slot_id
+
+
+def resolve_slots(faces):
+    """Phase 0: turn selected front faces into plain-data build recipes.
+
+    Everything a later phase needs is copied out into plain Python here, because
+    activating another document invalidates every live Fusion reference. Returns
+    (slots, problems); a face that cannot be resolved contributes a problem and no
+    slot, so one bad pick does not lose the whole selection.
+    """
+    slots, problems, seen = [], [], set()
+    for face in faces:
+        body = face.body
+        name = body.name
+        key = _body_identity(body)
+        if key in seen:
+            problems.append('"{}" was selected more than once — using the first '
+                            'face only.'.format(name))
+            continue
+        try:
+            normal = face.geometry.normal
+            frame = placeholder_core.target_frame((normal.x, normal.y, normal.z))
+            width, depth, height, centre = placeholder_core.extents_in_frame(
+                _body_vertices(body), frame)
+        except Exception as err:
+            problems.append('"{}": {}'.format(name, err))
+            continue
+        seen.add(key)
+        slots.append({
+            'body': body,
+            'slotId': read_slot_id(body),
+            'dims_cm': (width, depth, height),
+            'matrix': placeholder_core.occurrence_matrix(centre, frame),
+            'name': name,
+        })
+    return slots, problems
+
+
+def _own_sheet_url(design):
+    """This design's own linked-sheet URL, with NO fallback.
+
+    Deliberately does not use ``SheetVariants.load_design_url`` — that function
+    falls back to the app-level last-used sheet URL when the design has no
+    attribute of its own, which here would let an unrelated document's
+    last-used sheet masquerade as this mother's link: a never-linked mother
+    would silently report a non-empty sheetUrl, skipping the "no sheet link
+    yet" warning and then loading configs from the wrong spreadsheet.
+    """
+    try:
+        import SheetVariants
+        attr = design.attributes.itemByName(SheetVariants.DESIGN_ATTR_GROUP,
+                                            SheetVariants.DESIGN_ATTR_URL)
+        return attr.value if attr else ''
+    except Exception:
+        return ''
+
+
+def _mother_options(design):
+    """Cached mothers plus any prepared document currently open, keyed by fileId
+    so an open document supersedes its cache entry."""
+    import sheet_core
+    import SheetVariants
+    settings = sheet_core.load_settings(SheetVariants.SETTINGS_FILE)
+    options = {m['fileId']: m for m in sheet_core.known_mothers(settings)}
+    for i in range(app.documents.count):
+        doc = app.documents.item(i)
+        try:
+            other = adsk.fusion.Design.cast(
+                doc.products.itemByProductType('DesignProductType'))
+            if not other or not doc.dataFile:
+                continue
+            setup = read_mother_setup(other)
+            if placeholder_core.validate_mother_setup(setup):
+                continue
+            sheet_url = _own_sheet_url(other)
+            # A multi-tab config sheet's rows live on whatever tab the user
+            # pinned for it in the Build dialog — an empty tab makes
+            # get_rows() fall through to the CSV export of the sheet's FIRST
+            # tab (I6), which can be a completely different table.
+            spreadsheet_id = sheet_core.extract_spreadsheet_id(sheet_url)
+            tab = (SheetVariants.load_pinned_tab(settings, spreadsheet_id)
+                   if spreadsheet_id else '')
+            if not tab:
+                # Nothing pinned for THIS sheet (never "Load tabs"-ed in the
+                # Build dialog, or a single-tab/CSV link with no tabs to pin)
+                # must not blank out a tab this mother was already known to
+                # use — keep whatever the cache above already has for it
+                # rather than stomping a real value with ''.
+                cached = options.get(doc.dataFile.id)
+                tab = cached['tab'] if cached else ''
+            options[doc.dataFile.id] = {
+                'fileId': doc.dataFile.id, 'name': doc.name,
+                'sheetUrl': sheet_url, 'tab': tab}
+        except Exception:
+            continue
+    return sorted(options.values(), key=lambda m: m['name'])
+
+
+# Populated by FillCreatedHandler.notify, in the exact order the mother
+# dropdown's items are added, so _selected_mother can index into it directly:
+# no re-reading settings.json / re-scanning every open document on every
+# dropdown interaction, and no ambiguity when two mothers share a display name
+# (matching by name, as an earlier version did, resolves to whichever one
+# _mother_options happens to sort first).
+_mother_cache = []
+
+# fileIds this add-in has driven and RESTORED CLEANLY (unrestored_values() came
+# back empty every time) at least once in this Fusion session. See _open_mother
+# for why this exists: Fusion's isModified flag cannot by itself distinguish
+# the user's own unsaved work from dirt a drive-then-restore cycle leaves
+# behind even when every parameter came back exactly as captured.
+_cleanly_restored_file_ids = set()
+
+
+class FillCreatedHandler(adsk.core.CommandCreatedEventHandler):
+    def notify(self, args):
+        try:
+            cmd = args.command
+            inputs = cmd.commandInputs
+            design = adsk.fusion.Design.cast(app.activeProduct)
+            if not design:
+                inputs.addTextBoxCommandInput('err', '', 'Open a design first.', 2, True)
+                return
+
+            selection = inputs.addSelectionInput(
+                'faces', 'Front faces', 'Select the front face of each placeholder box')
+            selection.addSelectionFilter('PlanarFaces')
+            selection.setSelectionLimits(1, 0)
+
+            global _mother_cache
+            mothers = _mother_options(design)
+            _mother_cache = mothers
+            if not mothers:
+                inputs.addTextBoxCommandInput(
+                    'nomother', '',
+                    'No prepared mother models found. Open one and run Prepare Mother '
+                    'Model first.', 3, True)
+                return
+            drop = inputs.addDropDownCommandInput(
+                'mother', 'Mother model', adsk.core.DropDownStyles.TextListDropDownStyle)
+            for index, mother in enumerate(mothers):
+                drop.listItems.add(mother['name'], index == 0)
+
+            config = inputs.addDropDownCommandInput(
+                'config', 'Config', adsk.core.DropDownStyles.TextListDropDownStyle)
+            config.listItems.add('— press Load configs —', True)
+            inputs.addBoolValueInput('loadConfigs', 'Load configs', False, '', False)
+            inputs.addTextBoxCommandInput('report', 'Resolved', '', 6, True)
+
+            for handler_class, event in ((FillInputChangedHandler, cmd.inputChanged),
+                                         (FillExecuteHandler, cmd.execute)):
+                handler = handler_class()
+                event.add(handler)
+                _handlers.append(handler)
+
+            cmd.setDialogInitialSize(460, 460)
+        except Exception:
+            if ui:
+                ui.messageBox('Fill Placeholders failed:\n' + traceback.format_exc())
+
+
+def _selected_mother(inputs):
+    """The currently chosen mother, indexed out of ``_mother_cache`` by the
+    dropdown's selected position rather than matched by display name (see
+    ``_mother_cache``'s comment)."""
+    drop = inputs.itemById('mother')
+    item = drop.selectedItem if drop else None
+    if not item or item.index < 0 or item.index >= len(_mother_cache):
+        return None
+    return _mother_cache[item.index]
+
+
+def _describe(slots, problems):
+    lines = []
+    for slot in slots:
+        width, depth, height = slot['dims_cm']
+        lines.append('{} — {:.0f} x {:.0f} x {:.0f} mm'.format(
+            slot['name'], width * 10, depth * 10, height * 10))
+    for problem in problems:
+        lines.append('! ' + problem)
+    return '<br/>'.join(lines) if lines else 'Nothing selected yet.'
+
+
+class FillInputChangedHandler(adsk.core.InputChangedEventHandler):
+    def notify(self, args):
+        try:
+            inputs = args.inputs
+            changed = args.input
+            if not inputs.itemById('mother'):
+                return  # dialog stopped at "no prepared mother"; nothing built yet
+            if changed.id == 'faces':
+                selection = inputs.itemById('faces')
+                faces = [selection.selection(i).entity
+                         for i in range(selection.selectionCount)]
+                slots, problems = resolve_slots(faces)
+                inputs.itemById('report').formattedText = _describe(slots, problems)
+            elif changed.id == 'mother':
+                # A different mother's configs do not apply to whatever was
+                # picked before — reset to the sentinel so OK cannot silently
+                # build the new mother against a config that only happens to
+                # share a name with one of its rows (I3).
+                config = inputs.itemById('config')
+                config.listItems.clear()
+                config.listItems.add('— press Load configs —', True)
+            elif changed.id == 'loadConfigs' and changed.value:
+                changed.value = False
+                mother = _selected_mother(inputs)
+                if not mother or not mother['sheetUrl']:
+                    ui.messageBox('That mother has no sheet link yet. Open it and '
+                                  'run Build Variants Assembly from Sheet once to '
+                                  'link its sheet.')
+                    return
+                import SheetVariants
+                rows = SheetVariants.get_rows(mother['sheetUrl'], mother['tab'] or None)
+                config = inputs.itemById('config')
+                config.listItems.clear()
+                for index, row in enumerate(rows[1:]):
+                    name = (row[0] or '').strip()
+                    if name:
+                        config.listItems.add(name, config.listItems.count == 0)
+                if not config.listItems.count:
+                    config.listItems.add('— no named rows —', True)
+        except RuntimeError as err:
+            # Sheet-reading failures (network, sharing, format) carry a
+            # carefully worded, user-actionable message — show it plainly
+            # rather than wrapped in a stack trace (I4).
+            ui.messageBox(str(err))
+        except Exception:
+            ui.messageBox('Fill Placeholders failed:\n' + traceback.format_exc())
+
+
+class FillExecuteHandler(adsk.core.CommandEventHandler):
+    def notify(self, args):
+        try:
+            inputs = args.firingEvent.sender.commandInputs
+            if not inputs.itemById('mother'):
+                return  # dialog stopped at "no prepared mother"; nothing built yet
+            selection = inputs.itemById('faces')
+            faces = [selection.selection(i).entity
+                     for i in range(selection.selectionCount)]
+            slots, problems = resolve_slots(faces)
+            mother = _selected_mother(inputs)
+            item = inputs.itemById('config').selectedItem
+            # A placeholder label ("— press Load configs —", "— no named
+            # rows —") is a real, selectable list item and therefore truthy —
+            # exclude it explicitly rather than let it through as a config
+            # name _row_values then can't find (I3). Same idiom as
+            # SheetVariants.py's tab/testRow dropdowns.
+            config = item.name if item and not item.name.startswith('—') else ''
+            if not mother or not config:
+                ui.messageBox('Pick a mother model and a config first.')
+                return
+            report = build_children(slots, mother, config)
+            import sheet_core
+            import SheetVariants
+            settings = sheet_core.load_settings(SheetVariants.SETTINGS_FILE)
+            sheet_core.remember_mother(settings, mother)
+            sheet_core.save_settings(SheetVariants.SETTINGS_FILE, settings)
+            lines = report + ['! ' + p for p in problems]
+            ui.messageBox('\n'.join(lines) if lines else 'Nothing was built.')
+        except RuntimeError as err:
+            # build_children raises RuntimeError for whole-run preconditions
+            # ("unsaved changes", "not fully prepared", a stale config, a
+            # column that maps to no parameter) with a message already
+            # written for the user — show it plainly, not as a traceback (I4).
+            ui.messageBox(str(err))
+        except Exception:
+            ui.messageBox('Fill Placeholders failed:\n' + traceback.format_exc())
+
+
+_handlers = []
+
+# Panel this module last registered its controls into, so unregister() can find
+# and remove them even if it is not the add-in's own MANAGE panel — get_manage_
+# panel() in SheetVariants.py falls back to the native SolidScriptsAddinsPanel
+# when the MANAGE tab can't be found (e.g. a non-English Fusion), and that panel
+# is never deleted wholesale on reload the way the add-in's own panel is.
+_panel = None
+
+# (cmd_id, name, description, CommandCreatedEventHandler class) for every
+# command this module registers. register() and unregister() both loop over this.
+_COMMANDS = (
+    (PREPARE_CMD_ID, PREPARE_CMD_NAME, PREPARE_CMD_DESC, PrepareCreatedHandler),
+    (FILL_CMD_ID, FILL_CMD_NAME, FILL_CMD_DESC, FillCreatedHandler),
+)
+
+
+def register(panel):
+    """Create the command definitions and add them to ``panel``. Handlers are kept
+    in this module's _handlers list so Python does not garbage-collect them."""
+    global _panel
+    _panel = panel
+    for cmd_id, name, desc, created_handler_cls in _COMMANDS:
+        existing = ui.commandDefinitions.itemById(cmd_id)
+        if existing:
+            existing.deleteMe()
+        definition = ui.commandDefinitions.addButtonDefinition(cmd_id, name, desc)
+        handler = created_handler_cls()
+        definition.commandCreated.add(handler)
+        _handlers.append(handler)
+        if not panel.controls.itemById(cmd_id):
+            panel.controls.addCommand(definition)
+
+
+def unregister():
+    """Remove this module's command controls and definitions. Safe to call
+    repeatedly, and safe even if the panel this module registered into has since
+    been deleted (deleteMe() on a command definition does not remove the panel
+    control that references it, so both are removed here explicitly, each
+    independently guarded so one missing piece cannot stop the other from being
+    cleaned up)."""
+    global _panel
+    for cmd_id, _name, _desc, _cls in _COMMANDS:
+        if _panel:
+            try:
+                control = _panel.controls.itemById(cmd_id)
+                if control:
+                    control.deleteMe()
+            except Exception:
+                pass
+        try:
+            definition = ui.commandDefinitions.itemById(cmd_id)
+            if definition:
+                definition.deleteMe()
+        except Exception:
+            pass
+    _handlers[:] = []
+    _panel = None
+
+
+def attribute_list(found):
+    """Design.findAttributes() returns an **AttributeVector**, which is NOT a
+    Fusion collection — it has no .count or .item(i), and using them raises
+    AttributeError. Spike 2 confirmed this; len()/index is the working shape.
+    The .count branch is kept as a fallback for builds that expose the collection
+    shape instead."""
+    try:
+        return [found[i] for i in range(len(found))]
+    except (TypeError, AttributeError):
+        return [found.item(i) for i in range(found.count)]
+
+
+def find_slot_bodies(design):
+    """{slot id: body} for every placeholder in ``design``, in one call.
+
+    Used to re-find placeholder bodies AFTER a document switch has invalidated
+    the references captured during Phase 0."""
+    bodies = {}
+    for attribute in attribute_list(design.findAttributes(
+            placeholder_core.ATTR_GROUP, placeholder_core.SLOT_ID_ATTR)):
+        try:
+            bodies[attribute.value] = attribute.parent
+        except Exception:
+            continue
+    return bodies
+
+
+def find_children(design):
+    """(``{slot id: (occurrence, recipe)}``, ``{slot id: message}``) for every
+    child in ``design`` — the second dict is slots whose child was found but
+    cannot be rebuilt because it has been moved out of the top level.
+
+    findAttributes returns the whole set in one call, so no occurrence tree is
+    walked for that part. The attribute is written on the component, so its
+    occurrence is found by matching component names against the root's DIRECT
+    occurrences only — never ``allOccurrences`` (recursive/document-wide):
+    build_children applies ``slot['matrix']``, a WORLD matrix, straight to
+    ``occurrence.transform2``, but a nested occurrence's ``transform2`` is
+    relative to its PARENT occurrence, not world. Resolving through
+    ``allOccurrences`` would silently place a nested child wrongly rather than
+    fail loudly.
+
+    That means a child a designer has grouped into a sub-assembly (e.g. a
+    `Cabinets` component) is invisible to the direct-occurrence lookup even
+    though its recipe attribute is found document-wide. Silently falling
+    through to "unfilled" there would build a SECOND child on top of the
+    first (I8) — so ``allOccurrences`` IS still consulted, but only to tell
+    "exists, just not at the top level" apart from "does not exist at all",
+    and only to produce a clear per-slot failure instead of a silent
+    duplicate.
+
+    Both loops guard per-item, matching find_slot_bodies' pattern: one dead
+    occurrence or one unreadable attribute must not collapse this whole
+    lookup to {}, which would read every already-filled slot as unfilled and
+    duplicate it instead of rebuilding it in place.
+    """
+    found = {}
+    moved = {}
+    by_component = {}
+    for occurrence in design.rootComponent.occurrences:
+        try:
+            by_component.setdefault(occurrence.component.name, occurrence)
+        except Exception:
+            continue
+    nested_names = None  # computed lazily: only needed when a name misses above
+    nested_unavailable = False
+    for attribute in attribute_list(design.findAttributes(
+            placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR)):
+        try:
+            recipe = placeholder_core.loads_attr(attribute.value,
+                                                 placeholder_core.migrate_child_recipe)
+            component_name = attribute.parent.name
+        except Exception:
+            continue
+        if not recipe['slotId']:
+            continue
+        occurrence = by_component.get(component_name)
+        if occurrence:
+            found[recipe['slotId']] = (occurrence, recipe)
+            continue
+        if nested_names is None and not nested_unavailable:
+            nested_names = set()
+            try:
+                for occ in design.rootComponent.allOccurrences:
+                    try:
+                        nested_names.add(occ.component.name)
+                    except Exception:
+                        continue
+            except Exception:
+                # The COLLECTION access itself failed, not one item. Guarding
+                # only per-item would let this escape find_children entirely,
+                # collapsing both dicts and reading every already-filled slot as
+                # unfilled — which builds a SECOND child on top of each existing
+                # one and strands the designer's downstream features in the
+                # orphan. Refusing is the safe degradation: without this list we
+                # cannot tell "moved into a sub-assembly" from "deleted", and
+                # wrongly refusing a slot is loud and recoverable where wrongly
+                # duplicating one is neither.
+                nested_names = None
+                nested_unavailable = True
+        if nested_unavailable:
+            moved[recipe['slotId']] = (
+                'its child "{}" could not be located — Fusion did not return the '
+                'component list, so it was left alone rather than risk building '
+                'a duplicate on top of it'.format(component_name))
+            continue
+        if component_name in nested_names:
+            moved[recipe['slotId']] = (
+                'its child "{}" has been moved into a sub-assembly — move it '
+                'back to the top level of the design to rebuild it'
+                .format(component_name))
+    return found, moved
+
+
+def rebuild_child(design, occurrence, recipe, snaps, matrix16):
+    """Swap a child's geometry and re-place it, keeping the component and anything
+    the designer built on top of it.
+
+    Returns ``(ok, line)``: ``line`` is always a human-readable report line,
+    ``ok`` says whether the swap actually happened. Callers must branch on
+    ``ok`` rather than on ``line``'s wording — dispatching control flow on a
+    prose substring would couple a caller to this function's message text.
+    When ``ok`` is False the geometry may be in a bad state, so nothing here
+    re-places or re-skins the child; the caller must not treat it as rebuilt
+    either (no new recipe, no touching the placeholder box).
+    """
+    component = occurrence.component
+    base = build_engine.find_base_feature(component)
+    if base is None:
+        return False, '{} — cannot rebuild: its base feature was deleted'.format(
+            component.name)
+    ops = placeholder_core.pair_bodies(recipe['bodies'], [s['name'] for s in snaps])
+    failure = build_engine.rebuild_base_feature(component, base, snaps, ops)
+    if failure:
+        return False, '{} — rebuild failed: {}'.format(component.name, failure)
+    # reapply_looks pairs component.bRepBodies.item(i) with snaps[i] positionally
+    # (its contract, unchanged — build_exports' fresh-build path depends on it,
+    # and there snaps order IS collection order). On THIS path it is not: an
+    # 'add' in ops always lands at the tail of the physical collection, not at
+    # wherever pair_bodies happened to list it within snaps (see
+    # resulting_body_names). Reorder snaps into that physical order first, or a
+    # body ends up wearing a sibling's material/appearance (I1).
+    physical_snaps = placeholder_core.resulting_snap_order(recipe['bodies'], snaps, ops)
+    build_engine.reapply_looks(design, component, physical_snaps)
+    matrix = adsk.core.Matrix3D.create()
+    matrix.setWithArray(matrix16)
+    occurrence.transform2 = matrix
+    changed = sum(1 for op in ops if op[0] != 'update')
+    return True, '{} — rebuilt {} bodies{}'.format(
+        component.name, len(snaps),
+        ', {} added or removed'.format(changed) if changed else '')
+
+
+def _unique_component_name(root, wanted):
+    """``wanted``, suffixed _2, _3, ... if a component already has that name.
+
+    A child is named after its placeholder body so the browser reads like the
+    layout, but two boxes in different components may share a name and Fusion will
+    not silently disambiguate them for us."""
+    taken = set()
+    for occurrence in root.occurrences:
+        try:
+            taken.add(occurrence.component.name)
+        except Exception:
+            continue
+    if wanted not in taken:
+        return wanted
+    index = 2
+    while '{}_{}'.format(wanted, index) in taken:
+        index += 1
+    return '{}_{}'.format(wanted, index)
+
+
+def _row_values(rows, config):
+    """{parameter name: cell} for the row whose Name column is ``config``."""
+    header = [h.strip() for h in rows[0]]
+    for row in rows[1:]:
+        if (row[0] or '').strip() == config:
+            return {name: (row[i].strip() if i < len(row) else '')
+                    for i, name in enumerate(header) if i > 0 and name}
+    raise RuntimeError('Config "{}" is no longer in the sheet.'.format(config))
+
+
+def _cm(value):
+    """A parameter expression for a length in Fusion's internal centimetres."""
+    return '{:.6f} cm'.format(value)
+
+
+def _open_mother(file_id):
+    """(document, opened_by_us). Reuses an already-open document; refuses one with
+    unsaved changes, because a run edits and restores its parameters and a crash
+    partway would leave someone else's work in a variant state."""
+    for i in range(app.documents.count):
+        doc = app.documents.item(i)
+        try:
+            data_file = doc.dataFile
+        except Exception:
+            # Matches _mother_options' guard on the same access: an untitled
+            # scratch document can raise something other than AttributeError
+            # here, and one such document open anywhere in the session must not
+            # abort Fill entirely.
+            continue
+        if data_file and data_file.id == file_id:
+            if doc.isModified and file_id not in _cleanly_restored_file_ids:
+                # isModified alone cannot tell the user's unsaved work apart
+                # from dirt THIS add-in's own drive-then-restore cycle left
+                # behind: restore_values() writes every driven parameter's
+                # expression back exactly as captured, but Fusion still marks
+                # the document modified because a write happened — not
+                # because anything about the model actually changed. Refusing
+                # unconditionally would trip on the very first Fill run after
+                # Prepare (which itself writes a document attribute), or on a
+                # second Fill in the same session after a first one drove and
+                # cleanly restored the mother. And "just save it" is bad
+                # advice here: saving mints a new cloud version of a
+                # geometrically unchanged mother, staling every child already
+                # built off the current one (I5).
+                #
+                # So a fileId only ever enters _cleanly_restored_file_ids once
+                # build_children has driven it and confirmed EVERY restore
+                # came back clean (see the unrestored_names check there) — a
+                # genuinely dirty document still refuses the first time in a
+                # session, and a run whose restore did NOT come back clean
+                # never gets added, so the next attempt keeps refusing too.
+                raise RuntimeError(
+                    'The mother "{}" has unsaved changes. Save or discard them '
+                    'before filling placeholders.'.format(doc.name))
+            return doc, False
+    data_file = app.data.findFileById(file_id)
+    if not data_file:
+        raise RuntimeError('The mother model could not be found in your projects.')
+    return app.documents.open(data_file), True
+
+
+def _snapshot_for(setup, values, dims_cm, unrestored_names):
+    """Drive the mother to one config-and-size and snapshot its solids, already
+    transformed into the child's local space with the anchor at the origin.
+
+    Takes no ``design`` argument — every read below re-derives the design
+    fresh from ``app.activeProduct`` instead. On the 2nd+ distinct size in a
+    run, a handle from an earlier call has already survived one or more
+    recomputes, which is exactly what build_engine._design()'s docstring
+    warns can invalidate a held collection. The anchor read further down,
+    after apply_values(), already re-derives its own fresh handle too.
+
+    ``unrestored_names`` is a ``set`` the caller owns across the whole run:
+    any parameter this call could not restore is added to it here rather than
+    surfaced with a message box in this function. Collecting into one set and
+    letting the caller show a single box once the progress dialog is hidden
+    avoids popping a modal warning while another modal dialog is still on
+    screen.
+    """
+    frame = placeholder_core.mother_frame(setup['front'])
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    origins = design.rootComponent.jointOrgins
+    origin = origins.itemByName(setup['anchor'])
+    if not origin:
+        raise RuntimeError(
+            'The anchor joint origin "{}" is missing from this mother.'
+            .format(setup['anchor']))
+
+    driven = dict(values)
+    driven[setup['params']['width']] = _cm(dims_cm[0])
+    driven[setup['params']['depth']] = _cm(dims_cm[1])
+    driven[setup['params']['height']] = _cm(dims_cm[2])
+    for key in ('width', 'depth', 'height'):
+        if not design.allParameters.itemByName(setup['params'][key]):
+            raise RuntimeError('The mapped {} parameter "{}" is missing from this '
+                               'mother.'.format(key, setup['params'][key]))
+
+    original = build_engine.capture_values(list(driven.keys()))
+    try:
+        build_engine.apply_values(driven)
+        adsk.doEvents()
+        fresh = adsk.fusion.Design.cast(app.activeProduct)
+        # The anchor moves with the model, so read it AFTER the recompute.
+        point = fresh.rootComponent.jointOrgins.itemByName(
+            setup['anchor']).geometry.origin
+        bodies = []
+        for occurrence in fresh.rootComponent.allOccurrences:
+            bodies.extend(b for b in occurrence.bRepBodies if b.isSolid)
+        bodies.extend(b for b in fresh.rootComponent.bRepBodies if b.isSolid)
+        snaps = build_engine.snapshot_bodies(bodies)
+    finally:
+        build_engine.restore_values(original)
+        try:
+            adsk.doEvents()
+        except Exception:
+            pass
+        # restore_values() is deliberately best-effort per parameter, so a
+        # failed write is otherwise invisible. Verify it actually happened —
+        # even when the try above raised — because a mother silently left
+        # holding a driven value is a document that isModified will then push
+        # the user to SAVE, permanently baking that driven value in. Guarded:
+        # a throw here must not replace whatever exception the try above may
+        # already be propagating, and must not stop the caller's own cleanup
+        # (progress.hide(), returning to the layout, closing the mother).
+        try:
+            unrestored_names.update(build_engine.unrestored_values(original))
+        except Exception:
+            pass
+    build_engine.transform_snapshot(
+        snaps, placeholder_core.local_matrix((point.x, point.y, point.z), frame))
+    return snaps
+
+
+def build_children(slots, mother, config):
+    """Phases 1 and 2: drive the mother once per distinct size, then create a child
+    component per slot in the layout document.
+
+    The mother we opened is closed only at the very end, AFTER Phase 2 — not at
+    the end of Phase 1. Phase 1's snapshot_bodies() captures LIVE Appearance and
+    Material objects owned by the mother's bodies, and Phase 2's reapply_looks()
+    dereferences them (addByCopy() needs the live source). Closing the mother
+    between the two phases, as an earlier draft did, invalidates those objects
+    exactly the way activating another document invalidates every other live
+    reference to this one — build_exports() gets away with the same pattern only
+    because it never closes its source document.
+
+    Returns one report line per slot. A slot that cannot be built contributes a
+    failure line and is skipped; it never aborts the run, so one bad box does not
+    cost you the whole kitchen. Whole-run preconditions — the mother not being
+    prepared, unsaved changes in the mother, or a sheet column that maps to no
+    parameter — still abort the entire run before anything is touched.
+    """
+    layout_doc = app.activeDocument
+    rows_url, rows_tab = mother['sheetUrl'], mother['tab'] or None
+    import SheetVariants
+    values = _row_values(SheetVariants.get_rows(rows_url, rows_tab), config)
+
+    # Stamp slot ids NOW, while the layout is still active and Phase 0's body
+    # references are still alive. Opening the mother below invalidates every live
+    # reference to this design, so this is the last moment those bodies can be
+    # touched. From here on a slot is identified only by its id string, and the
+    # body is re-found by attribute in Phase 2.
+    for slot in slots:
+        try:
+            slot['slotId'] = ensure_slot_id(slot['body'])
+        except Exception:
+            slot['slotId'] = ''
+        slot.pop('body', None)   # dead weight from here on — never dereference it
+
+    failures = []
+    report = []
+    by_size = {}
+    doc = None
+    opened_by_us = False
+    version = None
+    cancelled_at = None
+    unrestored_names = set()
+
+    # The progress dialog covers Phase 1 only: driving and recomputing the mother
+    # is the slow part, while Phase 2 just copies snapshots that are already made.
+    progress = ui.createProgressDialog()
+    progress.isCancelButtonShown = True
+
+    try:
+        # Phase 1 — everything that needs the mother, with the layout in the
+        # background. show() and _open_mother() are both inside this try, with
+        # hide() in its finally, so the most likely abort in normal use — the
+        # mother having unsaved changes — hides the dialog instead of orphaning
+        # it in front of the error message box.
+        try:
+            progress.show('Filling placeholders', 'Placeholder %v of %m', 0,
+                          len(slots), 0)
+            doc, opened_by_us = _open_mother(mother['fileId'])
+            version = doc.dataFile.versionNumber if doc.dataFile else None
+            doc.activate()
+            adsk.doEvents()
+            mother_design = adsk.fusion.Design.cast(app.activeProduct)
+            setup = placeholder_core.migrate_mother_setup(
+                read_mother_setup(mother_design))
+            errors = placeholder_core.validate_mother_setup(setup)
+            if errors:
+                raise RuntimeError('"{}" is not fully prepared:\n• {}'
+                                   .format(mother['name'], '\n• '.join(errors)))
+            # A renamed or deleted mother parameter must fail loudly up front,
+            # matching build_exports' own check — not silently build a
+            # wrongly-sized or wrongly-configured child that reads as a success.
+            missing_columns = sorted(
+                name for name in values
+                if not mother_design.allParameters.itemByName(name))
+            if missing_columns:
+                raise RuntimeError(
+                    'These columns do not match any parameter in "{}": {}'
+                    .format(mother['name'], ', '.join(missing_columns)))
+
+            # One drive per DISTINCT size: a run of identical units costs one
+            # recompute. A cancel stops driving further sizes but does not raise
+            # — a deliberate cancel must read as a cancellation in the final
+            # report, not as a crash.
+            for index, slot in enumerate(slots):
+                if progress.wasCancelled:
+                    cancelled_at = index
+                    break
+                key = tuple(round(v, 6) for v in slot['dims_cm'])
+                if key not in by_size:
+                    try:
+                        by_size[key] = _snapshot_for(setup, values, slot['dims_cm'],
+                                                     unrestored_names)
+                    except Exception as err:
+                        # One unusable slot must not cost the whole run.
+                        failures.append('{} — {}'.format(slot['name'], err))
+                progress.progressValue = index + 1
+        finally:
+            try:
+                progress.hide()
+            except Exception:
+                pass
+
+        # Surface any restore failures ONE time, now that the progress dialog
+        # is (or at least was attempted to be) off screen — not per size, and
+        # not while a modal progress dialog is still up, which would just
+        # reintroduce the orphaned-dialog problem at a new site.
+        if unrestored_names:
+            ui.messageBox(
+                'Fill Placeholders could not restore {} to its original value '
+                'in "{}" after this run.\n\nThis mother is left MODIFIED with '
+                'a driven value still applied. Close it WITHOUT SAVING — '
+                'saving now would make that value permanent.'
+                .format(', '.join(sorted(unrestored_names)), mother['name']))
+        else:
+            # Every value driven in this run came back exactly as captured —
+            # any "modified" flag Fusion now shows on this mother is dirt this
+            # add-in's own drive-and-restore left behind, not unsaved user
+            # work. Let _open_mother's isModified check trust that for the
+            # rest of this session (I5).
+            _cleanly_restored_file_ids.add(mother['fileId'])
+
+        # Phase 2 — back in the layout, but the mother is STILL OPEN: its
+        # Appearance/Material objects, referenced live from the snapshots in
+        # by_size, must stay alive until reapply_looks() has copied them into
+        # the layout's design. The mother is only closed in the outer finally,
+        # once this phase is done.
+        layout_doc.activate()
+        adsk.doEvents()
+        design = adsk.fusion.Design.cast(app.activeProduct)
+        root = design.rootComponent
+        tbm = adsk.fusion.TemporaryBRepManager.get()
+        built_at = datetime.datetime.now().isoformat(timespec='seconds')
+        # Re-resolve the placeholder bodies AFTER the document switch. The
+        # references captured in Phase 0 are dead; these are looked up fresh by
+        # the slot ids stamped above. Guarded: one throw here must not lose the
+        # whole run after the mother has already been opened, driven and
+        # (about to be) closed — it only costs the "hide the box" step below.
+        try:
+            slot_bodies = find_slot_bodies(design)
+        except Exception as err:
+            slot_bodies = {}
+            failures.append('Could not re-find placeholder bodies to hide them: {}'
+                            .format(err))
+        # Already-filled slots are rebuilt in place rather than recreated (see
+        # rebuild_child); this must not lose the whole run if it fails, so a
+        # slot whose child cannot be found this way is just treated as unfilled
+        # and built fresh below, at the cost of possibly duplicating a child
+        # that already exists.
+        try:
+            children, moved_children = find_children(design)
+        except Exception as err:
+            children, moved_children = {}, {}
+            failures.append('Could not look up already-filled slots ({}); any '
+                            'that exist will be duplicated instead of rebuilt.'
+                            .format(err))
+
+        for index, slot in enumerate(slots):
+            if cancelled_at is not None and index >= cancelled_at:
+                failures.append('{} — cancelled before it was built.'
+                                .format(slot['name']))
+                continue
+            key = tuple(round(v, 6) for v in slot['dims_cm'])
+            template = by_size.get(key)
+            if template is None:
+                continue  # its failure is already recorded
+            if not template:
+                failures.append('{} — the mother produced no solid bodies at '
+                                'that size.'.format(slot['name']))
+                continue
+            if not slot['slotId']:
+                failures.append('{} — no slot id was stamped, so its recipe '
+                                'would not be usable later; skipped.'
+                                .format(slot['name']))
+                continue
+            if slot['slotId'] in moved_children:
+                # Better a clear refusal than the silent duplicate building it
+                # fresh below would create (I8): its recipe attribute exists,
+                # so it is NOT unfilled, but find_children could not resolve
+                # it to a top-level occurrence it can safely rebuild.
+                failures.append('{} — {}.'.format(slot['name'], moved_children[slot['slotId']]))
+                continue
+
+            # Phase 2 is isolated per slot: an occurrence is only ever left
+            # behind once it has a full recipe attribute. A throw partway
+            # through — add_snapshot, reapply_looks, the attribute write — must
+            # not abort every remaining slot, and must not leave the half-built
+            # occurrence it was working on: an empty component with no recipe
+            # is exactly the half-built child this design forbids.
+            occurrence = None
+            created = False
+            try:
+                # Copy again per slot: identical units share one recompute, not
+                # one body.
+                snaps = [{'temp': tbm.copy(s['temp']), 'appearance': s['appearance'],
+                          'material': s['material'], 'name': s['name']}
+                         for s in template]
+
+                existing = children.get(slot['slotId']) if slot['slotId'] else None
+                new_names = [s['name'] for s in snaps]
+                if existing:
+                    # Already filled: swap the geometry in place inside its base
+                    # feature (rebuild_child / rebuild_base_feature) instead of
+                    # recreating the component, so downstream features the
+                    # designer added survive. rebuild_child reports an expected
+                    # failure (an old base feature, a stale recipe, a downstream
+                    # feature that could not recompute) via its (ok, line)
+                    # return rather than raising, so branch on ok — not on line's
+                    # wording, which is prose for the user, not a control signal.
+                    occurrence, old_recipe = existing
+                    ok, line = rebuild_child(design, occurrence, old_recipe, snaps,
+                                             slot['matrix'])
+                    if not ok:
+                        # The geometry may be in a bad state: do not stamp a new
+                        # recipe over it or touch the box below. Leave the last
+                        # known-good recipe in place for the user to inspect.
+                        failures.append(line)
+                        continue
+                    # The base feature's PHYSICAL body order after the swap is
+                    # not necessarily new_names' order: an 'add' always lands at
+                    # the tail of the real collection, wherever pair_bodies
+                    # happened to list it within new_names. Recording new_names
+                    # here instead would corrupt the NEXT rebuild's pairing
+                    # silently — no exception, no failure line — because that
+                    # rebuild's old_index values would then point at whatever
+                    # body actually sits at each position, not the one the
+                    # recipe claims.
+                    body_names = placeholder_core.resulting_body_names(
+                        old_recipe['bodies'], new_names,
+                        placeholder_core.pair_bodies(old_recipe['bodies'], new_names))
+                else:
+                    matrix = adsk.core.Matrix3D.create()
+                    matrix.setWithArray(slot['matrix'])
+                    occurrence = root.occurrences.addNewComponent(matrix)
+                    created = True
+                    occurrence.component.name = _unique_component_name(root, slot['name'])
+                    build_engine.add_snapshot(occurrence.component, snaps)
+                    build_engine.reapply_looks(design, occurrence.component, snaps)
+                    # A brand-new component starts empty, so snaps order IS
+                    # collection order — no reordering to account for here,
+                    # unlike the rebuild branch above.
+                    body_names = new_names
+                    line = '{} — built {} bodies'.format(slot['name'], len(snaps))
+
+                recipe = placeholder_core.new_child_recipe(
+                    slot_id=slot['slotId'],
+                    mother={'fileId': mother['fileId'], 'name': mother['name'],
+                            'version': version},
+                    config=config, sheet_url=rows_url, tab=mother['tab'],
+                    dims_cm=slot['dims_cm'],
+                    bodies=body_names,
+                    built_at=built_at)
+                occurrence.component.attributes.add(
+                    placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
+                    placeholder_core.dumps_attr(recipe))
+                body = slot_bodies.get(slot['slotId'])
+                if body is not None:
+                    try:
+                        body.isLightBulbOn = False
+                    except Exception:
+                        pass
+                # Appended only now, after every step that could still throw and
+                # leave the child half-updated — so a slot never ends up with
+                # both a "built"/"rebuilt" line and a failure line in the same
+                # report (I5): if the recipe write or box hide above throws, the
+                # except block below records the failure and this line, having
+                # never been appended, does not also claim success.
+                report.append(line)
+            except Exception as err:
+                # Only ever delete an occurrence THIS iteration created. An
+                # already-filled slot's occurrence pre-dates this run — deleting
+                # it because a later step (the recipe write, the box hide) threw
+                # would destroy the designer's real component, recipe and all,
+                # which is exactly what rebuilding in place exists to prevent.
+                if created and occurrence is not None:
+                    try:
+                        occurrence.deleteMe()
+                    except Exception:
+                        pass
+                failures.append('{} — {}'.format(slot['name'], err))
+    finally:
+        # Always return to the layout — on success, on a whole-run failure, and
+        # on cancellation alike — so the user is never left staring at the
+        # mother, whether or not it was ever activated. Unconditional rather
+        # than guarded by an activeDocument comparison: re-activating a
+        # document that is already active is harmless, and the Fusion API's
+        # wrapper objects are not guaranteed to compare equal by identity.
+        try:
+            layout_doc.activate()
+            adsk.doEvents()
+        except Exception:
+            pass
+        # Close the mother LAST, now that Phase 2 no longer needs its live
+        # Appearance/Material objects, and only if this run is the one that
+        # opened it — never a document the user already had open. Guarded so a
+        # throw here cannot mask whatever real exception is already propagating.
+        if opened_by_us and doc is not None:
+            try:
+                doc.close(False)
+            except Exception:
+                pass
+        try:
+            adsk.doEvents()
+        except Exception:
+            pass
+
+    return report + failures

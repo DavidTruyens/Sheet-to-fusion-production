@@ -1825,6 +1825,33 @@ import build_engine
 Then append to `SheetVariants/placeholder_cmds.py`:
 
 ```python
+def attribute_list(found):
+    """Design.findAttributes() returns an **AttributeVector**, which is NOT a
+    Fusion collection — it has no .count or .item(i), and using them raises
+    AttributeError. Spike 2 confirmed this; len()/index is the working shape.
+    The .count branch is kept as a fallback for builds that expose the collection
+    shape instead."""
+    try:
+        return [found[i] for i in range(len(found))]
+    except (TypeError, AttributeError):
+        return [found.item(i) for i in range(found.count)]
+
+
+def find_slot_bodies(design):
+    """{slot id: body} for every placeholder in ``design``, in one call.
+
+    Used to re-find placeholder bodies AFTER a document switch has invalidated
+    the references captured during Phase 0."""
+    bodies = {}
+    for attribute in attribute_list(design.findAttributes(
+            placeholder_core.ATTR_GROUP, placeholder_core.SLOT_ID_ATTR)):
+        try:
+            bodies[attribute.value] = attribute.parent
+        except Exception:
+            continue
+    return bodies
+
+
 def _unique_component_name(root, wanted):
     """``wanted``, suffixed _2, _3, ... if a component already has that name.
 
@@ -1935,6 +1962,18 @@ def build_children(slots, mother, config):
     import SheetVariants
     values = _row_values(SheetVariants.get_rows(rows_url, rows_tab), config)
 
+    # Stamp slot ids NOW, while the layout is still active and Phase 0's body
+    # references are still alive. Opening the mother below invalidates every live
+    # reference to this design, so this is the last moment those bodies can be
+    # touched. From here on a slot is identified only by its id string, and the
+    # body is re-found by attribute in Phase 2.
+    for slot in slots:
+        try:
+            slot['slotId'] = ensure_slot_id(slot['body'])
+        except Exception:
+            slot['slotId'] = ''
+        slot.pop('body', None)   # dead weight from here on — never dereference it
+
     # The progress dialog covers Phase 1 only: driving and recomputing the mother
     # is the slow part, while Phase 2 just copies snapshots that are already made.
     progress = ui.createProgressDialog()
@@ -1981,6 +2020,10 @@ def build_children(slots, mother, config):
     root = design.rootComponent
     tbm = adsk.fusion.TemporaryBRepManager.get()
     built_at = datetime.datetime.now().isoformat(timespec='seconds')
+    # Re-resolve the placeholder bodies AFTER the document switch. The references
+    # captured in Phase 0 are dead; these are looked up fresh by the slot ids
+    # stamped above.
+    slot_bodies = find_slot_bodies(design)
     report = []
     for slot in slots:
         key = tuple(round(v, 6) for v in slot['dims_cm'])
@@ -1998,9 +2041,8 @@ def build_children(slots, mother, config):
         build_engine.add_snapshot(occurrence.component, snaps)
         build_engine.reapply_looks(design, occurrence.component, snaps)
 
-        slot_id = ensure_slot_id(slot['body'])
         recipe = placeholder_core.new_child_recipe(
-            slot_id=slot_id,
+            slot_id=slot['slotId'],
             mother={'fileId': mother['fileId'], 'name': mother['name'],
                     'version': version},
             config=config, sheet_url=rows_url, tab=mother['tab'],
@@ -2010,13 +2052,23 @@ def build_children(slots, mother, config):
         occurrence.component.attributes.add(
             placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
             placeholder_core.dumps_attr(recipe))
-        try:
-            slot['body'].isLightBulbOn = False
-        except Exception:
-            pass
+        body = slot_bodies.get(slot['slotId'])
+        if body is not None:
+            try:
+                body.isLightBulbOn = False
+            except Exception:
+                pass
         report.append('{} — built {} bodies'.format(slot['name'], len(snaps)))
     return report + failures
 ```
+
+**Why the slot id is stamped before Phase 1 and the body re-found in Phase 2:**
+this is the same invalidation rule `build_exports()` documents — activating another
+document kills every live reference to this one. An earlier draft of this task
+called `ensure_slot_id(slot['body'])` and `slot['body'].isLightBulbOn = False` in
+Phase 2, i.e. after the mother had been opened and closed. Those references are
+dead by then. Stamping while the layout is still active and re-finding by
+attribute afterwards is the only ordering that works.
 
 - [ ] **Step 2: Replace the dry run with the real build**
 
@@ -2081,8 +2133,8 @@ git commit -m "feat: build child components from mother, config and placeholder 
 - Produces:
   - `build_engine.rebuild_base_feature(component, base, snaps, ops) -> str` — `""` on success, else a human-readable failure reason. It does **not** raise: spike 3 showed `finishEdit()` can throw when a downstream feature was built on the old topology, and that must fail one child, not the run.
   - `build_engine.find_base_feature(component) -> BaseFeature|None`
-  - `placeholder_cmds.attribute_list(found) -> list[Attribute]` — normalises the `AttributeVector` that `Design.findAttributes()` returns (see the note in the code; it is **not** a Fusion collection)
   - `placeholder_cmds.find_children(design) -> dict[slot_id, (occurrence, recipe)]`
+  - **Already defined in Task 9** and reused here, do not redefine: `attribute_list(found)`, `find_slot_bodies(design)`
   - `placeholder_cmds.rebuild_child(design, occurrence, recipe, snaps, matrix) -> str`
 
 **Prerequisite:** Spike 3 PASSED. If it did not, stop — the freeze-flag alternative is a decision for the user, not a workaround to code around.
@@ -2184,18 +2236,6 @@ call has moved INSIDE the edit, it now returns source bodies — which is what
 Append to `SheetVariants/placeholder_cmds.py`:
 
 ```python
-def attribute_list(found):
-    """Design.findAttributes() returns an **AttributeVector**, which is NOT a
-    Fusion collection — it has no .count or .item(i), and using them raises
-    AttributeError. Spike 2 confirmed this; len()/index is the working shape.
-    The .count branch is kept as a fallback for builds that expose the collection
-    shape instead."""
-    try:
-        return [found[i] for i in range(len(found))]
-    except (TypeError, AttributeError):
-        return [found.item(i) for i in range(found.count)]
-
-
 def find_children(design):
     """{slot id: (occurrence, recipe)} for every child in ``design``.
 

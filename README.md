@@ -191,6 +191,56 @@ summary, and the rest of the profile still builds from whatever components
 were found. A profile is only skipped entirely if none of its components (or,
 for Whole model, no solid bodies at all) are found.
 
+## Placeholders — building a kitchen from one mother model
+
+Lay out a design as plain boxes, then fill each box with a configuration of a
+parametric model. The box's size drives the model; its front face sets which way
+the result faces.
+
+**1. Prepare the mother.** Open your parametric model, add a joint origin at the
+point that should sit at the centre of a placeholder box, and run **Prepare Mother
+Model**. Pick that joint origin as the anchor, say which axis points out of its
+front, and map its width, depth and height parameters. This is stored on the
+document, so it travels with the file.
+
+The anchor is the only positioning control: to shift the model inside its box,
+move the joint origin.
+
+**2. Lay out the boxes.** In your layout design, model one box body per slot —
+sketch and extrude them however you like, conventionally grouped in a `Layout`
+component and placed first in the timeline so you can always roll back to the
+conceptual layout. A box need not be axis-aligned; a corner unit rotated 45° is
+measured correctly.
+
+**3. Fill them.** Run **Fill Placeholders**, select the **front face** of each box,
+pick the mother and one config from its sheet, and click OK. Each box gets its own
+child component, sized to itself, named after the box body. Boxes are hidden once
+filled, never deleted.
+
+Selecting several faces at once assigns them all in one go — a run of five base
+units is one gesture, and each is still built to its own size.
+
+**4. Change your mind.** Re-run **Fill Placeholders** on a box that already has a
+child to give it a different config, or after moving or resizing the box. The child
+is rebuilt **in place**, so features you added yourself survive when they don't
+depend on the shape being replaced: a cut sketched on an origin plane is re-applied
+to the new geometry at full depth, whatever size the box changed to.
+
+A fillet or chamfer on a generated edge, or a sketch on a generated face, does not
+survive — that edge or face is gone once the shape changes. It's **reported, not
+silent**: the child comes back as `rebuild failed`. By then the geometry swap has
+already happened, so this is not a no-op — the downstream feature that couldn't
+recompute is destroyed, and the child can be left in a bad, half-updated state
+rather than untouched. Re-running **Fill Placeholders** on it is the recovery: it
+drives a fresh rebuild rather than trying to repair the half-built one. One
+fragile feature costs you that one cabinet, not the kitchen — everything else in
+the run still updates.
+
+A child that has been moved into a sub-assembly (grouped under another component,
+the way step 2 suggests doing for boxes) can't be found for a rebuild either — Fill
+Placeholders reports that slot as unrebuildable rather than silently building a
+duplicate on top of it. Keep a filled child at the top level of the design.
+
 ## How the Google connection works
 
 Fusion's bundled Python can't easily install the Google client libraries, so the

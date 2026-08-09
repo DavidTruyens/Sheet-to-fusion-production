@@ -392,3 +392,146 @@ def test_pair_bodies_to_empty_is_all_removes():
 
 def test_pair_bodies_handles_none():
     assert pc.pair_bodies(None, None) == []
+
+
+def test_resulting_body_names_identical_lists_are_unchanged():
+    ops = pc.pair_bodies(["A", "B"], ["A", "B"])
+    assert pc.resulting_body_names(["A", "B"], ["A", "B"], ops) == ["A", "B"]
+
+
+def test_resulting_body_names_reorder_does_not_move_bodies():
+    # Fusion only ever writes updates in place; a name reorder in new_names
+    # does not reorder the physical collection.
+    ops = pc.pair_bodies(["A", "B"], ["B", "A"])
+    assert pc.resulting_body_names(["A", "B"], ["B", "A"], ops) == ["A", "B"]
+
+
+def test_resulting_body_names_add_at_the_tail():
+    ops = pc.pair_bodies(["A"], ["A", "B"])
+    assert pc.resulting_body_names(["A"], ["A", "B"], ops) == ["A", "B"]
+
+
+def test_resulting_body_names_add_in_the_middle():
+    # The exact corruption case: pair_bodies lists the add as index 1 of
+    # new_names, but component.bRepBodies.add() always appends to the tail of
+    # the CURRENT collection, so the physical order is A, C, B -- not A, B, C.
+    old, new = ["A", "C"], ["A", "B", "C"]
+    ops = pc.pair_bodies(old, new)
+    assert pc.resulting_body_names(old, new, ops) == ["A", "C", "B"]
+
+
+def test_resulting_body_names_remove():
+    ops = pc.pair_bodies(["A", "B"], ["A"])
+    assert pc.resulting_body_names(["A", "B"], ["A"], ops) == ["A"]
+
+
+def test_resulting_body_names_mixed_add_and_remove():
+    old, new = ["A", "X"], ["A", "B"]
+    ops = pc.pair_bodies(old, new)
+    assert pc.resulting_body_names(old, new, ops) == ["A", "B"]
+
+
+def test_resulting_body_names_empty_to_n():
+    ops = pc.pair_bodies([], ["A", "B"])
+    assert pc.resulting_body_names([], ["A", "B"], ops) == ["A", "B"]
+
+
+def test_resulting_body_names_n_to_empty():
+    ops = pc.pair_bodies(["A", "B"], [])
+    assert pc.resulting_body_names(["A", "B"], [], ops) == []
+
+
+def test_resulting_body_names_multiple_removes_use_original_positions():
+    # Two removes must be resolved against their positions in the ORIGINAL
+    # old_names, not by deleting one at a time and letting later indices
+    # shift down -- deleteMe() is applied to a materialized list, not a live
+    # collection that renumbers itself as this function computes survivors.
+    old, new = ["A", "B", "C", "D"], ["A", "C"]
+    ops = pc.pair_bodies(old, new)
+    assert pc.resulting_body_names(old, new, ops) == ["A", "C"]
+
+
+def test_resulting_snap_order_identical_lists_are_unchanged():
+    ops = pc.pair_bodies(["A", "B"], ["A", "B"])
+    assert pc.resulting_snap_order(["A", "B"], ["snapA", "snapB"], ops) == ["snapA", "snapB"]
+
+
+def test_resulting_snap_order_reorder_does_not_move_items():
+    # Mirrors test_resulting_body_names_reorder_does_not_move_bodies: the new
+    # list names B before A, but Fusion only ever updates bodies in place, so
+    # the item that lands at physical position 0 is still whatever pairs with
+    # old position 0 (A), not whatever is first in new_items.
+    ops = pc.pair_bodies(["A", "B"], ["B", "A"])
+    assert pc.resulting_snap_order(["A", "B"], ["snapB", "snapA"], ops) == ["snapA", "snapB"]
+
+
+def test_resulting_snap_order_add_in_the_middle():
+    # The I1 regression case: an oak carcass (A) plus a new middle body (B)
+    # plus an existing side (C). pair_bodies lists the add at new_names index
+    # 1, but component.bRepBodies.add() appends to the tail, so the physical
+    # order is A, C, B -- the look for B must follow it there, not stay at
+    # logical position 1.
+    old, new = ["A", "C"], ["A", "B", "C"]
+    ops = pc.pair_bodies(old, new)
+    items = ["snapA", "snapB", "snapC"]
+    assert pc.resulting_snap_order(old, items, ops) == ["snapA", "snapC", "snapB"]
+
+
+def test_resulting_snap_order_remove():
+    ops = pc.pair_bodies(["A", "B"], ["A"])
+    assert pc.resulting_snap_order(["A", "B"], ["snapA"], ops) == ["snapA"]
+
+
+def test_resulting_snap_order_mixed_add_and_remove():
+    old, new = ["A", "X"], ["A", "B"]
+    ops = pc.pair_bodies(old, new)
+    assert pc.resulting_snap_order(old, ["snapA", "snapB"], ops) == ["snapA", "snapB"]
+
+
+def test_resulting_snap_order_empty_to_n():
+    ops = pc.pair_bodies([], ["A", "B"])
+    assert pc.resulting_snap_order([], ["snapA", "snapB"], ops) == ["snapA", "snapB"]
+
+
+def test_resulting_snap_order_n_to_empty():
+    ops = pc.pair_bodies(["A", "B"], [])
+    assert pc.resulting_snap_order(["A", "B"], [], ops) == []
+
+
+def test_resulting_snap_order_matches_resulting_body_names_positions():
+    # The property that actually matters for I1: whichever position a name
+    # ends up at via resulting_body_names, resulting_snap_order must put that
+    # same name's item at the same position, for a whole spread of cases.
+    cases = [
+        (["A", "C"], ["A", "B", "C"]),
+        (["A", "B", "C"], ["C", "A"]),
+        (["A", "B"], ["A", "B", "C"]),
+        ([], ["A", "B"]),
+        (["A", "B", "C", "D"], ["A", "C"]),
+    ]
+    for old, new in cases:
+        ops = pc.pair_bodies(old, new)
+        names = pc.resulting_body_names(old, new, ops)
+        items = pc.resulting_snap_order(old, ["item_" + n for n in new], ops)
+        assert items == ["item_" + n for n in names], (old, new, names, items)
+
+
+def test_pair_bodies_fed_resulting_names_is_a_stable_no_op():
+    # The property that actually matters: recording the ACTUAL resulting
+    # order (not new_names) as the next rebuild's "old" bodies means a second
+    # pairing against the same target produces nothing but updates -- no
+    # adds, no removes -- because every body is already there, just possibly
+    # in a different order. This is the exact invariant Critical 1 broke.
+    cases = [
+        (["A", "C"], ["A", "B", "C"]),
+        (["A", "B", "C"], ["C", "A"]),
+        (["A", "B"], ["A", "B", "C"]),
+        ([], ["A", "B"]),
+        (["A", "B", "C", "D"], ["A", "C"]),
+    ]
+    for old, new in cases:
+        ops = pc.pair_bodies(old, new)
+        resulting = pc.resulting_body_names(old, new, ops)
+        ops2 = pc.pair_bodies(resulting, new)
+        kinds = [op[0] for op in ops2]
+        assert kinds == ["update"] * len(new), (old, new, resulting, ops2)

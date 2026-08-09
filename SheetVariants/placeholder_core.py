@@ -303,3 +303,69 @@ def pair_bodies(old_names, new_names):
             matched.add(new_index)
     adds = [("add", None, i) for i in range(len(new_keys)) if i not in matched]
     return updates + adds + removes
+
+
+def resulting_body_names(old_names, new_names, ops):
+    """The order ``old_names`` will actually be in once ``ops`` (from
+    ``pair_bodies``) are applied by the Fusion consumer — NOT the same thing
+    as ``new_names``.
+
+    This distinction is the whole reason this function exists: an 'add' in
+    ``ops`` is positioned wherever ``pair_bodies`` happened to place its
+    unmatched name in ``new_names``, but the Fusion API this drives
+    (``component.bRepBodies.add()``) always appends to the TAIL of the
+    collection as it stands at that moment — never inserts at the add's
+    ``new_index`` position. An 'update' writes in place at ``old_index`` and
+    changes nothing about position. So whenever an add is not already at the
+    tail, the physical collection order diverges from ``new_names``' order.
+
+    Recording *this* function's return value — not ``new_names`` — as a
+    child's next recipe is what keeps a second rebuild's ``old_index``
+    values pointing at the bodies they actually mean: caught the hard way,
+    the alternative corrupts a rebuild two runs later, silently, with no
+    exception and no failure line, because index N in a wrongly-recorded
+    recipe would name a different body than index N in the real collection.
+
+    Removes are resolved against their ORIGINAL positions in ``old_names``
+    (every ``old_index`` in ``ops`` is relative to it, never to a partially
+    trimmed list), which is why survivors are computed in one pass rather
+    than by deleting one at a time and letting later indices shift down —
+    that shift is exactly the bug this function exists to avoid reproducing.
+    """
+    working = list(old_names or [])
+    for kind, old_index, new_index in ops:
+        if kind == 'update':
+            working[old_index] = new_names[new_index]
+    removed = {old_index for kind, old_index, _ in ops if kind == 'remove'}
+    survivors = [name for i, name in enumerate(working) if i not in removed]
+    adds = [new_names[new_index] for kind, _, new_index in ops if kind == 'add']
+    return survivors + adds
+
+
+def resulting_snap_order(old_names, new_items, ops):
+    """``new_items`` (parallel to the ``new_names`` passed into ``pair_bodies``)
+    reordered into the PHYSICAL order ``ops`` leaves the real Fusion collection
+    in — the exact same reordering ``resulting_body_names`` performs on the
+    names themselves, kept as a separate function because a caller (reapplying
+    a material/appearance per body) needs the object that goes WITH each name,
+    not just the name string ``resulting_body_names`` returns.
+
+    Re-deriving that mapping by matching ``resulting_body_names``' output back
+    onto ``new_items`` by name would have to re-disambiguate duplicate
+    qualified names a second time; working from ``ops`` directly needs no such
+    step, because each op's ``new_index`` already identifies the exact item —
+    it is the same index ``pair_bodies`` used to build ``new_names`` in the
+    first place.
+
+    See ``resulting_body_names`` for why the physical order differs from
+    ``new_items``'s order at all: an 'add' always lands at the tail of the
+    live collection, never at its ``new_index`` position.
+    """
+    working = [None] * len(old_names or [])
+    for kind, old_index, new_index in ops:
+        if kind == 'update':
+            working[old_index] = new_items[new_index]
+    removed = {old_index for kind, old_index, _ in ops if kind == 'remove'}
+    survivors = [item for i, item in enumerate(working) if i not in removed]
+    adds = [new_items[new_index] for kind, _, new_index in ops if kind == 'add']
+    return survivors + adds

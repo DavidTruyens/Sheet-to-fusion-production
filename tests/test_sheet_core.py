@@ -319,6 +319,44 @@ def test_validate_comma_decimal_is_error_with_cell_ref():
     assert any("18,2" in e and "B3" in e for e in rep.errors)
 
 
+def test_known_mothers_defaults_to_empty():
+    assert sheet_core.known_mothers({}) == []
+    assert sheet_core.known_mothers({"mothers": "nonsense"}) == []
+    # A bare dict (not a list of dicts) must be rejected outright, not treated
+    # as a single implicit entry — genuinely exercises the isinstance(list)
+    # guard rather than being caught incidentally by the per-entry dict check.
+    assert sheet_core.known_mothers({"mothers": {"fileId": "urn:a"}}) == []
+
+
+def test_remember_mother_adds_an_entry():
+    s = {}
+    sheet_core.remember_mother(s, {"fileId": "urn:a", "name": "base.f3d",
+                                   "sheetUrl": "https://s", "tab": "Cab"})
+    assert sheet_core.known_mothers(s) == [
+        {"fileId": "urn:a", "name": "base.f3d", "sheetUrl": "https://s", "tab": "Cab"}]
+
+
+def test_remember_mother_replaces_by_file_id():
+    s = {}
+    sheet_core.remember_mother(s, {"fileId": "urn:a", "name": "old.f3d",
+                                   "sheetUrl": "", "tab": ""})
+    sheet_core.remember_mother(s, {"fileId": "urn:a", "name": "new.f3d",
+                                   "sheetUrl": "https://s", "tab": "Cab"})
+    mothers = sheet_core.known_mothers(s)
+    assert len(mothers) == 1
+    assert mothers[0]["name"] == "new.f3d"
+
+
+def test_remember_mother_ignores_an_entry_with_no_file_id():
+    s = {}
+    sheet_core.remember_mother(s, {"name": "x.f3d"})
+    assert sheet_core.known_mothers(s) == []
+    # Assert against the raw settings dict too: known_mothers' own filtering
+    # would otherwise mask remember_mother leaking a junk {"fileId": "", ...}
+    # row into settings["mothers"] permanently.
+    assert s.get("mothers") is None
+
+
 def test_validate_missing_name_header_is_error():
     rep = sheet_core.validate_mapping(["Naam", "diameter"], [], {"diameter"}, ["diameter"])
     assert not rep.ok
