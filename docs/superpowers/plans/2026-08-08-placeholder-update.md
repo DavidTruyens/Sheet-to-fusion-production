@@ -331,19 +331,10 @@ git commit -m "feat(core): staleness, resize/move/rotation detection and status 
 Append to `SheetVariants/placeholder_cmds.py`:
 
 ```python
-def find_slot_bodies(design):
-    """{slot id: body} for every placeholder in ``design``, in one call.
-
-    Goes through attribute_list() because findAttributes returns an
-    AttributeVector, which has no .count/.item(i) — see Plan 1 Task 10."""
-    bodies = {}
-    for attribute in attribute_list(design.findAttributes(
-            placeholder_core.ATTR_GROUP, placeholder_core.SLOT_ID_ATTR)):
-        try:
-            bodies[attribute.value] = attribute.parent
-        except Exception:
-            continue
-    return bodies
+#  find_slot_bodies() and attribute_list() ALREADY EXIST — Plan 1 Task 9 defines
+#  them, because Phase 2 needs to re-find placeholder bodies after a document
+#  switch invalidates the ones captured in Phase 0. Do NOT redefine them here;
+#  just call find_slot_bodies(design).
 
 
 def _current_versions(recipes):
