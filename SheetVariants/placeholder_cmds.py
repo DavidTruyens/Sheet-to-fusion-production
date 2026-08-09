@@ -92,6 +92,10 @@ class PrepareCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
             cmd = args.command
+            # Fusion executes a PRE-EMPTED command "as if the user clicked OK" by
+            # default, and switching documents pre-empts. Writing this mother's
+            # setup attribute because someone changed tabs is not acceptable.
+            cmd.isExecutedWhenPreEmpted = False
             inputs = cmd.commandInputs
             design = adsk.fusion.Design.cast(app.activeProduct)
             if not design:
@@ -375,6 +379,11 @@ class FillCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
             cmd = args.command
+            # THE important one. Pre-emption defaults to executing the command,
+            # and executing this one opens the mother document, drives its
+            # parameters and builds geometry. Switching documents must never do
+            # that. See CommandCreatedHandler in SheetVariants.py.
+            cmd.isExecutedWhenPreEmpted = False
             inputs = cmd.commandInputs
             design = adsk.fusion.Design.cast(app.activeProduct)
             if not design:
