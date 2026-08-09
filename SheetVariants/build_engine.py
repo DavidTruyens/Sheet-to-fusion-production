@@ -94,6 +94,29 @@ def restore_values(values):
             pass
 
 
+def unrestored_values(values):
+    """Names in ``values`` whose current expression does not match what was
+    captured, i.e. parameters ``restore_values`` silently failed to put back.
+
+    ``restore_values`` is deliberately best-effort per parameter — one failure
+    must not stop the rest from being restored — but that means nothing else
+    notices when a restore did not actually happen. A caller that drove a
+    document's parameters and cannot confirm they came back must know: the
+    document is left MODIFIED with a driven value still in place, which is a
+    materially different, and worse, situation than "restore raised and was
+    ignored" would suggest.
+    """
+    design = _design()
+    all_params = design.allParameters
+    bad = []
+    for name, expected in values.items():
+        param = all_params.itemByName(name)
+        current = param.expression if param else None
+        if current != expected:
+            bad.append(name)
+    return bad
+
+
 def snapshot_bodies(bodies):
     """Copy each body to a temporary BRep, keeping its qualified name and its
     body-level appearance override and material. Bodies that cannot be copied are

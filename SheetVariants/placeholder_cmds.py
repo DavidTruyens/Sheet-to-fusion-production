@@ -609,14 +609,19 @@ def _open_mother(file_id):
     for i in range(app.documents.count):
         doc = app.documents.item(i)
         try:
-            if doc.dataFile and doc.dataFile.id == file_id:
-                if doc.isModified:
-                    raise RuntimeError(
-                        'The mother "{}" has unsaved changes. Save or discard them '
-                        'before filling placeholders.'.format(doc.name))
-                return doc, False
-        except AttributeError:
+            data_file = doc.dataFile
+        except Exception:
+            # Matches _mother_options' guard on the same access: an untitled
+            # scratch document can raise something other than AttributeError
+            # here, and one such document open anywhere in the session must not
+            # abort Fill entirely.
             continue
+        if data_file and data_file.id == file_id:
+            if doc.isModified:
+                raise RuntimeError(
+                    'The mother "{}" has unsaved changes. Save or discard them '
+                    'before filling placeholders.'.format(doc.name))
+            return doc, False
     data_file = app.data.findFileById(file_id)
     if not data_file:
         raise RuntimeError('The mother model could not be found in your projects.')
@@ -625,8 +630,18 @@ def _open_mother(file_id):
 
 def _snapshot_for(design, setup, values, dims_cm):
     """Drive the mother to one config-and-size and snapshot its solids, already
-    transformed into the child's local space with the anchor at the origin."""
+    transformed into the child's local space with the anchor at the origin.
+
+    ``design`` is re-derived fresh from ``app.activeProduct`` immediately below
+    rather than trusted as passed in: on the 2nd+ distinct size in a run, the
+    caller's handle has already survived one or more recomputes from earlier
+    calls, which is exactly what build_engine._design()'s docstring warns can
+    invalidate a held collection. The anchor read further down, after
+    apply_values(), already re-derives its own fresh handle — that part is
+    unchanged.
+    """
     frame = placeholder_core.mother_frame(setup['front'])
+    design = adsk.fusion.Design.cast(app.activeProduct)
     origins = design.rootComponent.jointOrgins
     origin = origins.itemByName(setup['anchor'])
     if not origin:
@@ -643,6 +658,7 @@ def _snapshot_for(design, setup, values, dims_cm):
             raise RuntimeError('The mapped {} parameter "{}" is missing from this '
                                'mother.'.format(key, setup['params'][key]))
 
+    mother_name = design.parentDocument.name
     original = build_engine.capture_values(list(driven.keys()))
     try:
         build_engine.apply_values(driven)
@@ -659,6 +675,19 @@ def _snapshot_for(design, setup, values, dims_cm):
     finally:
         build_engine.restore_values(original)
         adsk.doEvents()
+        # restore_values() is deliberately best-effort per parameter, so a
+        # failed write is otherwise invisible. Verify it actually happened —
+        # even when the try above raised — because a mother silently left
+        # holding a driven value is a document that isModified will then push
+        # the user to SAVE, permanently baking that driven value in.
+        unrestored = build_engine.unrestored_values(original)
+        if unrestored:
+            ui.messageBox(
+                'Fill Placeholders drove {} in "{}" and could NOT restore the '
+                'original value.\n\nThis mother is now left MODIFIED with a '
+                'driven value still applied. Close it WITHOUT SAVING — saving '
+                'now would make that value permanent.'
+                .format(', '.join(sorted(unrestored)), mother_name))
     build_engine.transform_snapshot(
         snaps, placeholder_core.local_matrix((point.x, point.y, point.z), frame))
     return snaps
@@ -668,9 +697,20 @@ def build_children(slots, mother, config):
     """Phases 1 and 2: drive the mother once per distinct size, then create a child
     component per slot in the layout document.
 
+    The mother we opened is closed only at the very end, AFTER Phase 2 — not at
+    the end of Phase 1. Phase 1's snapshot_bodies() captures LIVE Appearance and
+    Material objects owned by the mother's bodies, and Phase 2's reapply_looks()
+    dereferences them (addByCopy() needs the live source). Closing the mother
+    between the two phases, as an earlier draft did, invalidates those objects
+    exactly the way activating another document invalidates every other live
+    reference to this one — build_exports() gets away with the same pattern only
+    because it never closes its source document.
+
     Returns one report line per slot. A slot that cannot be built contributes a
     failure line and is skipped; it never aborts the run, so one bad box does not
-    cost you the whole kitchen.
+    cost you the whole kitchen. Whole-run preconditions — the mother not being
+    prepared, unsaved changes in the mother, or a sheet column that maps to no
+    parameter — still abort the entire run before anything is touched.
     """
     layout_doc = app.activeDocument
     rows_url, rows_tab = mother['sheetUrl'], mother['tab'] or None
@@ -689,89 +729,179 @@ def build_children(slots, mother, config):
             slot['slotId'] = ''
         slot.pop('body', None)   # dead weight from here on — never dereference it
 
+    failures = []
+    report = []
+    by_size = {}
+    doc = None
+    opened_by_us = False
+    version = None
+    cancelled_at = None
+
     # The progress dialog covers Phase 1 only: driving and recomputing the mother
     # is the slow part, while Phase 2 just copies snapshots that are already made.
     progress = ui.createProgressDialog()
     progress.isCancelButtonShown = True
-    progress.show('Filling placeholders', 'Placeholder %v of %m', 0, len(slots), 0)
-    failures = []
 
-    # Phase 1 — everything that needs the mother, with the layout in the background.
-    doc, opened_by_us = _open_mother(mother['fileId'])
-    version = doc.dataFile.versionNumber if doc.dataFile else None
-    by_size = {}
     try:
-        doc.activate()
+        # Phase 1 — everything that needs the mother, with the layout in the
+        # background. show() and _open_mother() are both inside this try, with
+        # hide() in its finally, so the most likely abort in normal use — the
+        # mother having unsaved changes — hides the dialog instead of orphaning
+        # it in front of the error message box.
+        try:
+            progress.show('Filling placeholders', 'Placeholder %v of %m', 0,
+                          len(slots), 0)
+            doc, opened_by_us = _open_mother(mother['fileId'])
+            version = doc.dataFile.versionNumber if doc.dataFile else None
+            doc.activate()
+            adsk.doEvents()
+            mother_design = adsk.fusion.Design.cast(app.activeProduct)
+            setup = placeholder_core.migrate_mother_setup(
+                read_mother_setup(mother_design))
+            errors = placeholder_core.validate_mother_setup(setup)
+            if errors:
+                raise RuntimeError('"{}" is not fully prepared:\n• {}'
+                                   .format(mother['name'], '\n• '.join(errors)))
+            # A renamed or deleted mother parameter must fail loudly up front,
+            # matching build_exports' own check — not silently build a
+            # wrongly-sized or wrongly-configured child that reads as a success.
+            missing_columns = sorted(
+                name for name in values
+                if not mother_design.allParameters.itemByName(name))
+            if missing_columns:
+                raise RuntimeError(
+                    'These columns do not match any parameter in "{}": {}'
+                    .format(mother['name'], ', '.join(missing_columns)))
+
+            # One drive per DISTINCT size: a run of identical units costs one
+            # recompute. A cancel stops driving further sizes but does not raise
+            # — a deliberate cancel must read as a cancellation in the final
+            # report, not as a crash.
+            for index, slot in enumerate(slots):
+                if progress.wasCancelled:
+                    cancelled_at = index
+                    break
+                key = tuple(round(v, 6) for v in slot['dims_cm'])
+                if key not in by_size:
+                    try:
+                        by_size[key] = _snapshot_for(mother_design, setup, values,
+                                                     slot['dims_cm'])
+                    except Exception as err:
+                        # One unusable slot must not cost the whole run.
+                        failures.append('{} — {}'.format(slot['name'], err))
+                progress.progressValue = index + 1
+        finally:
+            progress.hide()
+
+        # Phase 2 — back in the layout, but the mother is STILL OPEN: its
+        # Appearance/Material objects, referenced live from the snapshots in
+        # by_size, must stay alive until reapply_looks() has copied them into
+        # the layout's design. The mother is only closed in the outer finally,
+        # once this phase is done.
+        layout_doc.activate()
         adsk.doEvents()
-        mother_design = adsk.fusion.Design.cast(app.activeProduct)
-        setup = placeholder_core.migrate_mother_setup(read_mother_setup(mother_design))
-        errors = placeholder_core.validate_mother_setup(setup)
-        if errors:
-            raise RuntimeError('"{}" is not fully prepared:\n• {}'
-                               .format(mother['name'], '\n• '.join(errors)))
-        # One drive per DISTINCT size: a run of identical units costs one recompute.
+        design = adsk.fusion.Design.cast(app.activeProduct)
+        root = design.rootComponent
+        tbm = adsk.fusion.TemporaryBRepManager.get()
+        built_at = datetime.datetime.now().isoformat(timespec='seconds')
+        # Re-resolve the placeholder bodies AFTER the document switch. The
+        # references captured in Phase 0 are dead; these are looked up fresh by
+        # the slot ids stamped above. Guarded: one throw here must not lose the
+        # whole run after the mother has already been opened, driven and
+        # (about to be) closed — it only costs the "hide the box" step below.
+        try:
+            slot_bodies = find_slot_bodies(design)
+        except Exception as err:
+            slot_bodies = {}
+            failures.append('Could not re-find placeholder bodies to hide them: {}'
+                            .format(err))
+
         for index, slot in enumerate(slots):
-            if progress.wasCancelled:
-                raise RuntimeError('Cancelled by user.')
+            if cancelled_at is not None and index >= cancelled_at:
+                failures.append('{} — cancelled before it was built.'
+                                .format(slot['name']))
+                continue
             key = tuple(round(v, 6) for v in slot['dims_cm'])
-            if key not in by_size:
-                try:
-                    by_size[key] = _snapshot_for(mother_design, setup, values,
-                                                 slot['dims_cm'])
-                except Exception as err:
-                    # One unusable slot must not cost the whole run.
-                    failures.append('{} — {}'.format(slot['name'], err))
-            progress.progressValue = index + 1
-    finally:
-        if opened_by_us:
-            doc.close(False)
-        adsk.doEvents()
-        progress.hide()
+            template = by_size.get(key)
+            if template is None:
+                continue  # its failure is already recorded
+            if not template:
+                failures.append('{} — the mother produced no solid bodies at '
+                                'that size.'.format(slot['name']))
+                continue
+            if not slot['slotId']:
+                failures.append('{} — no slot id was stamped, so its recipe '
+                                'would not be usable later; skipped.'
+                                .format(slot['name']))
+                continue
 
-    # Phase 2 — back in the layout, with every snapshot already in hand.
-    layout_doc.activate()
-    adsk.doEvents()
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    root = design.rootComponent
-    tbm = adsk.fusion.TemporaryBRepManager.get()
-    built_at = datetime.datetime.now().isoformat(timespec='seconds')
-    # Re-resolve the placeholder bodies AFTER the document switch. The references
-    # captured in Phase 0 are dead; these are looked up fresh by the slot ids
-    # stamped above.
-    slot_bodies = find_slot_bodies(design)
-    report = []
-    for slot in slots:
-        key = tuple(round(v, 6) for v in slot['dims_cm'])
-        template = by_size.get(key)
-        if template is None:
-            continue  # its failure is already recorded
-        # Copy again per slot: identical units share one recompute, not one body.
-        snaps = [{'temp': tbm.copy(s['temp']), 'appearance': s['appearance'],
-                  'material': s['material'], 'name': s['name']} for s in template]
-
-        matrix = adsk.core.Matrix3D.create()
-        matrix.setWithArray(slot['matrix'])
-        occurrence = root.occurrences.addNewComponent(matrix)
-        occurrence.component.name = _unique_component_name(root, slot['name'])
-        build_engine.add_snapshot(occurrence.component, snaps)
-        build_engine.reapply_looks(design, occurrence.component, snaps)
-
-        recipe = placeholder_core.new_child_recipe(
-            slot_id=slot['slotId'],
-            mother={'fileId': mother['fileId'], 'name': mother['name'],
-                    'version': version},
-            config=config, sheet_url=rows_url, tab=mother['tab'],
-            dims_cm=slot['dims_cm'],
-            bodies=[s['name'] for s in snaps],
-            built_at=built_at)
-        occurrence.component.attributes.add(
-            placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
-            placeholder_core.dumps_attr(recipe))
-        body = slot_bodies.get(slot['slotId'])
-        if body is not None:
+            # Phase 2 is isolated per slot: an occurrence is only ever left
+            # behind once it has a full recipe attribute. A throw partway
+            # through — add_snapshot, reapply_looks, the attribute write — must
+            # not abort every remaining slot, and must not leave the half-built
+            # occurrence it was working on: an empty component with no recipe
+            # is exactly the half-built child this design forbids.
+            occurrence = None
             try:
-                body.isLightBulbOn = False
+                # Copy again per slot: identical units share one recompute, not
+                # one body.
+                snaps = [{'temp': tbm.copy(s['temp']), 'appearance': s['appearance'],
+                          'material': s['material'], 'name': s['name']}
+                         for s in template]
+
+                matrix = adsk.core.Matrix3D.create()
+                matrix.setWithArray(slot['matrix'])
+                occurrence = root.occurrences.addNewComponent(matrix)
+                occurrence.component.name = _unique_component_name(root, slot['name'])
+                build_engine.add_snapshot(occurrence.component, snaps)
+                build_engine.reapply_looks(design, occurrence.component, snaps)
+
+                recipe = placeholder_core.new_child_recipe(
+                    slot_id=slot['slotId'],
+                    mother={'fileId': mother['fileId'], 'name': mother['name'],
+                            'version': version},
+                    config=config, sheet_url=rows_url, tab=mother['tab'],
+                    dims_cm=slot['dims_cm'],
+                    bodies=[s['name'] for s in snaps],
+                    built_at=built_at)
+                occurrence.component.attributes.add(
+                    placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
+                    placeholder_core.dumps_attr(recipe))
+                body = slot_bodies.get(slot['slotId'])
+                if body is not None:
+                    try:
+                        body.isLightBulbOn = False
+                    except Exception:
+                        pass
+                report.append('{} — built {} bodies'.format(slot['name'], len(snaps)))
+            except Exception as err:
+                if occurrence is not None:
+                    try:
+                        occurrence.deleteMe()
+                    except Exception:
+                        pass
+                failures.append('{} — {}'.format(slot['name'], err))
+    finally:
+        # Always return to the layout — on success, on a whole-run failure, and
+        # on cancellation alike — so the user is never left staring at the
+        # mother, whether or not it was ever activated. Unconditional rather
+        # than guarded by an activeDocument comparison: re-activating a
+        # document that is already active is harmless, and the Fusion API's
+        # wrapper objects are not guaranteed to compare equal by identity.
+        try:
+            layout_doc.activate()
+            adsk.doEvents()
+        except Exception:
+            pass
+        # Close the mother LAST, now that Phase 2 no longer needs its live
+        # Appearance/Material objects, and only if this run is the one that
+        # opened it — never a document the user already had open. Guarded so a
+        # throw here cannot mask whatever real exception is already propagating.
+        if opened_by_us and doc is not None:
+            try:
+                doc.close(False)
             except Exception:
                 pass
-        report.append('{} — built {} bodies'.format(slot['name'], len(snaps)))
+        adsk.doEvents()
+
     return report + failures
