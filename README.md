@@ -213,9 +213,14 @@ conceptual layout. A box need not be axis-aligned; a corner unit rotated 45° is
 measured correctly.
 
 **3. Fill them.** Run **Fill Placeholders**, select the **front face** of each box,
-pick the mother and one config from its sheet, and click OK. Each box gets its own
-child component, sized to itself, named after the box body. Boxes are hidden once
-filled, never deleted.
+pick the mother, and click OK. Each box gets its own child component, sized to
+itself, named after the box body. Boxes are hidden once filled, never deleted.
+
+**Config is optional.** Left on *none (size only)*, each box drives just the
+mother's width, depth and height and every other parameter keeps its current
+value — no sheet is read, so a mother that was never linked to one still works.
+Press **Load configs** and pick a row when you want the sheet to set everything
+else too (door count, handle type, and so on).
 
 Selecting several faces at once assigns them all in one go — a run of five base
 units is one gesture, and each is still built to its own size.

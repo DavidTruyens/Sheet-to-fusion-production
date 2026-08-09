@@ -133,18 +133,15 @@ class PrepareCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 missing.append('anchor')
             _add_dropdown(inputs, 'front', 'Front faces along',
                           list(placeholder_core.FRONT_AXES), setup['front'])
-            _, matched = _add_dropdown(inputs, 'pWidth', 'Width parameter', params,
-                                       setup['params']['width'])
-            if not matched:
-                missing.append('width')
-            _, matched = _add_dropdown(inputs, 'pDepth', 'Depth parameter', params,
-                                       setup['params']['depth'])
-            if not matched:
-                missing.append('depth')
-            _, matched = _add_dropdown(inputs, 'pHeight', 'Height parameter', params,
-                                       setup['params']['height'])
-            if not matched:
-                missing.append('height')
+            dimension_drops = []
+            for input_id, label, key in (('pWidth', 'Width parameter', 'width'),
+                                         ('pDepth', 'Depth parameter', 'depth'),
+                                         ('pHeight', 'Height parameter', 'height')):
+                drop, matched = _add_dropdown(inputs, input_id, label, params,
+                                              setup['params'][key])
+                dimension_drops.append(drop)
+                if not matched:
+                    missing.append(key)
 
             if missing:
                 inputs.addTextBoxCommandInput(
@@ -153,12 +150,36 @@ class PrepareCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     'and have been reset: {}. Check every dropdown before '
                     'clicking OK.'.format(', '.join(missing)),
                     3, True)
+            # With nothing stored yet every dropdown falls back to the FIRST
+            # parameter, so all three start out identical. On a model whose
+            # parameters are named d1/d2/d3 that is easy to miss, and clicking
+            # OK would save a mother that drives one parameter for all three
+            # dimensions — every child then comes out a cube, with no error.
+            # Warn rather than block: a square-plan unit legitimately drives
+            # width and depth from one parameter.
+            # Read what the dropdowns actually SHOW, not what was stored — on a
+            # first run nothing is stored and the shown values come from the
+            # fallback, which is precisely the case this warns about.
+            picked = []
+            for drop in dimension_drops:
+                try:
+                    picked.append(drop.selectedItem.name if drop.selectedItem else '')
+                except Exception:
+                    picked.append('')
+            chosen = [p for p in picked if p]
+            if len(set(chosen)) < len(chosen):
+                inputs.addTextBoxCommandInput(
+                    'dupe', '',
+                    'Two or more dimensions are mapped to the same parameter. '
+                    'That is only right if this model really is driven that way '
+                    '— otherwise pick a different parameter for each.',
+                    3, True)
             inputs.addTextBoxCommandInput(
                 'hint', '',
                 'The anchor is the point that lands at the centre of the '
                 'placeholder box. To shift the model within its box, move the '
                 'joint origin.',
-                3, True)
+                4, True)   # 3 rows clipped this mid-sentence in practice
 
             handler = PrepareExecuteHandler()
             cmd.execute.add(handler)
@@ -205,9 +226,17 @@ class PrepareExecuteHandler(adsk.core.CommandEventHandler):
 
 FILL_CMD_ID = 'sheetVariantsFillPlaceholdersCmd'
 FILL_CMD_NAME = 'Fill Placeholders'
-FILL_CMD_DESC = ('Assign a prepared mother model, at a chosen config, to the '
-                 'selected placeholder boxes. Each box drives its own width, '
-                 'depth and height.')
+FILL_CMD_DESC = ('Assign a prepared mother model to the selected placeholder '
+                 'boxes. Each box drives its own width, depth and height; a '
+                 'sheet config is optional and sets everything else.')
+
+# Config dropdown labels. NO_CONFIG_LABEL is a real CHOICE — size-only, no sheet
+# read at all — and is the default. The other two are unset states. All three
+# start with an em dash, so code must compare against NO_CONFIG_LABEL by value
+# rather than treating every dashed label as "nothing selected".
+NO_CONFIG_LABEL = '— none (size only) —'
+LOAD_CONFIGS_LABEL = '— press Load configs —'
+NO_ROWS_LABEL = '— no named rows —'
 
 
 def _body_vertices(body):
@@ -411,7 +440,8 @@ class FillCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
             config = inputs.addDropDownCommandInput(
                 'config', 'Config', adsk.core.DropDownStyles.TextListDropDownStyle)
-            config.listItems.add('— press Load configs —', True)
+            config.listItems.add(NO_CONFIG_LABEL, True)
+            config.listItems.add(LOAD_CONFIGS_LABEL, False)
             inputs.addBoolValueInput('loadConfigs', 'Load configs', False, '', False)
             inputs.addTextBoxCommandInput('report', 'Resolved', '', 6, True)
 
@@ -469,7 +499,8 @@ class FillInputChangedHandler(adsk.core.InputChangedEventHandler):
                 # share a name with one of its rows (I3).
                 config = inputs.itemById('config')
                 config.listItems.clear()
-                config.listItems.add('— press Load configs —', True)
+                config.listItems.add(NO_CONFIG_LABEL, True)
+                config.listItems.add(LOAD_CONFIGS_LABEL, False)
             elif changed.id == 'loadConfigs' and changed.value:
                 changed.value = False
                 mother = _selected_mother(inputs)
@@ -482,12 +513,15 @@ class FillInputChangedHandler(adsk.core.InputChangedEventHandler):
                 rows = SheetVariants.get_rows(mother['sheetUrl'], mother['tab'] or None)
                 config = inputs.itemById('config')
                 config.listItems.clear()
-                for index, row in enumerate(rows[1:]):
+                # Keep "none" first and selected: loading the list is not the
+                # same as choosing a row, and size-only stays the default.
+                config.listItems.add(NO_CONFIG_LABEL, True)
+                for row in rows[1:]:
                     name = (row[0] or '').strip()
                     if name:
-                        config.listItems.add(name, config.listItems.count == 0)
-                if not config.listItems.count:
-                    config.listItems.add('— no named rows —', True)
+                        config.listItems.add(name, False)
+                if config.listItems.count == 1:
+                    config.listItems.add(NO_ROWS_LABEL, False)
         except RuntimeError as err:
             # Sheet-reading failures (network, sharing, format) carry a
             # carefully worded, user-actionable message — show it plainly
@@ -509,14 +543,22 @@ class FillExecuteHandler(adsk.core.CommandEventHandler):
             slots, problems = resolve_slots(faces)
             mother = _selected_mother(inputs)
             item = inputs.itemById('config').selectedItem
-            # A placeholder label ("— press Load configs —", "— no named
-            # rows —") is a real, selectable list item and therefore truthy —
-            # exclude it explicitly rather than let it through as a config
-            # name _row_values then can't find (I3). Same idiom as
-            # SheetVariants.py's tab/testRow dropdowns.
-            config = item.name if item and not item.name.startswith('—') else ''
-            if not mother or not config:
-                ui.messageBox('Pick a mother model and a config first.')
+            label = item.name if item else ''
+            # NO_CONFIG_LABEL is a real choice, not an unset placeholder: it
+            # means "drive only width/depth/height from the box and leave every
+            # other parameter at the mother's current value". The OTHER dashed
+            # labels ("press Load configs", "no named rows") ARE unset states
+            # and must not reach _row_values as a config name (I3).
+            if label == NO_CONFIG_LABEL:
+                config = ''
+            elif label.startswith('—'):
+                ui.messageBox('Pick a config, or leave it on "{}" to drive only '
+                              'the size from each box.'.format(NO_CONFIG_LABEL))
+                return
+            else:
+                config = label
+            if not mother:
+                ui.messageBox('Pick a mother model first.')
                 return
             report = build_children(slots, mother, config)
             import sheet_core
@@ -930,9 +972,16 @@ def build_children(slots, mother, config):
     parameter — still abort the entire run before anything is touched.
     """
     layout_doc = app.activeDocument
-    rows_url, rows_tab = mother['sheetUrl'], mother['tab'] or None
     import SheetVariants
-    values = _row_values(SheetVariants.get_rows(rows_url, rows_tab), config)
+    if config:
+        rows_url, rows_tab = mother['sheetUrl'], mother['tab'] or None
+        values = _row_values(SheetVariants.get_rows(rows_url, rows_tab), config)
+    else:
+        # Size-only: the box drives width/depth/height and every other parameter
+        # keeps the mother's current value. No sheet is read, so a mother that
+        # has never been linked to one is perfectly usable this way.
+        rows_url, rows_tab = '', ''
+        values = {}
 
     # Stamp slot ids NOW, while the layout is still active and Phase 0's body
     # references are still alive. Opening the mother below invalidates every live
@@ -1159,7 +1208,10 @@ def build_children(slots, mother, config):
                     slot_id=slot['slotId'],
                     mother={'fileId': mother['fileId'], 'name': mother['name'],
                             'version': version},
-                    config=config, sheet_url=rows_url, tab=mother['tab'],
+                    # rows_url/rows_tab are '' for a size-only child, so the
+                    # recipe records that no sheet was involved and a later
+                    # rebuild knows not to look for one.
+                    config=config, sheet_url=rows_url, tab=(rows_tab or ''),
                     dims_cm=slot['dims_cm'],
                     bodies=body_names,
                     built_at=built_at)
