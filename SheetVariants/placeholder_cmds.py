@@ -566,8 +566,16 @@ def register(panel):
         handler = created_handler_cls()
         definition.commandCreated.add(handler)
         _handlers.append(handler)
-        if not panel.controls.itemById(cmd_id):
-            panel.controls.addCommand(definition)
+        control = (panel.controls.itemById(cmd_id)
+                   or panel.controls.addCommand(definition))
+        if control:
+            # Without this the button is added to the panel's OVERFLOW ("...")
+            # menu rather than the panel itself, so it looks like the command
+            # was never registered at all. run() promotes its own two commands
+            # the same way; this module was not doing it and the buttons were
+            # invisible in practice.
+            control.isPromoted = True
+            control.isPromotedByDefault = True
 
 
 def unregister():
