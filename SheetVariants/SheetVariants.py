@@ -38,6 +38,8 @@ if _ADDIN_DIR not in sys.path:
 # add-in always picks up the current file instead of a stale cached version.
 sys.modules.pop('sheet_core', None)
 import sheet_core
+sys.modules.pop('build_engine', None)
+import build_engine
 
 app = adsk.core.Application.get()
 ui = app.userInterface
@@ -226,34 +228,6 @@ def save_design_url(design, url):
 # --------------------------------------------------------------------------- #
 # Core work.
 # --------------------------------------------------------------------------- #
-def apply_expression(param, raw):
-    """Write a sheet cell into a parameter's expression.
-
-    Text parameters need a single-quoted string expression (e.g. 'A-6'), but a
-    sheet usually supplies the bare text — sometimes with a stray quote left
-    over from a spreadsheet's text-prefix (so "1-1" can arrive as "1-1'"). We
-    detect text parameters from their current expression and re-quote the value;
-    numeric parameters get the value as-is.
-    """
-    raw = raw.strip()
-    if not raw:
-        return
-    current = (param.expression or '').strip()
-    if current[:1] in ("'", '"'):                     # existing text parameter
-        param.expression = "'" + raw.strip('\'"') + "'"
-        return
-    try:
-        param.expression = raw
-    except Exception:
-        try:                                          # maybe an unquoted text param
-            param.expression = "'" + raw.strip('\'"') + "'"
-        except Exception:
-            raise RuntimeError(
-                'Could not set parameter "{}" to "{}". Numeric values may need a '
-                'unit (e.g. "50 mm"); text values are quoted automatically.'
-                .format(param.name, raw))
-
-
 def iter_solid_bodies(design):
     """Yield every solid BRepBody in the design (root plus all occurrences),
     as proxies positioned in their assembly-context (world) location."""
@@ -321,27 +295,6 @@ RESOLVERS = {
 }
 
 
-def _appearance_in(design, src_appr):
-    """The appearance named like ``src_appr`` inside ``design``, copied in once if
-    needed. Lets a copied body show the source body's appearance (temporary BReps
-    lose it). Returns None if it can't be copied."""
-    try:
-        existing = design.appearances.itemByName(src_appr.name)
-        return existing or design.appearances.addByCopy(src_appr, src_appr.name)
-    except Exception:
-        return None
-
-
-def _material_in(design, src_mat):
-    """The material named like ``src_mat`` inside ``design``, copied in once if
-    needed. Returns None if it can't be copied."""
-    try:
-        existing = design.materials.itemByName(src_mat.name)
-        return existing or design.materials.addByCopy(src_mat, src_mat.name)
-    except Exception:
-        return None
-
-
 def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
     """Build one new design per enabled profile. Each profile is built into its
     own document (created before parameters are edited, so the source model is in
@@ -366,8 +319,7 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
     if not enabled:
         raise RuntimeError('No export profiles are enabled. Enable at least one profile and run again.')
 
-    original = {p: all_params.itemByName(p).expression for p in param_names}
-    tbm = adsk.fusion.TemporaryBRepManager.get()
+    original = build_engine.capture_values(param_names)
 
     # One build context per enabled profile; pre-validate selections.
     present = component_names(src_design)
@@ -414,52 +366,25 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 name = raw_name or 'Variant_{}'.format(i + 1)
                 safe_name = re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip() or 'Variant_{}'.format(i + 1)
 
+                values = {}
                 for col, pname in enumerate(param_names, start=1):
                     if col < len(row):
-                        val = row[col].strip()
-                        if val:
-                            # Re-derive design + parameter FRESH for every apply:
-                            # setting a driving dimension recomputes the model,
-                            # which can invalidate the parameter collection, so the
-                            # one from the previous apply may already be dead.
-                            p = adsk.fusion.Design.cast(app.activeProduct).allParameters.itemByName(pname)
-                            if p:
-                                apply_expression(p, val)
+                        values[pname] = row[col].strip()
+                build_engine.apply_values(values)
                 adsk.doEvents()  # recompute the source with this variant's values
 
                 design = adsk.fusion.Design.cast(app.activeProduct)  # fresh after recompute
                 for ctx in active:
                     resolver = RESOLVERS[ctx['profile']['rule']]
                     src_bodies, _warn = resolver(design, ctx['profile'])
-                    temp_bodies = []
-                    for body in src_bodies:
-                        try:
-                            tmp = tbm.copy(body)
-                        except Exception:
-                            continue
-                        appr = mat = None
-                        try:
-                            appr = body.appearance   # body-level override, or None
-                        except Exception:
-                            pass
-                        try:
-                            mat = body.material
-                        except Exception:
-                            pass
-                        temp_bodies.append((tmp, appr, mat))
-                    if temp_bodies:
-                        ctx.setdefault('variants', []).append((safe_name, temp_bodies))
+                    snaps = build_engine.snapshot_bodies(src_bodies)
+                    if snaps:
+                        ctx.setdefault('variants', []).append((safe_name, snaps))
                 progress.progressValue = i + 1
         finally:
             # Restore the source model — re-derive fresh per parameter, since each
             # set can recompute and invalidate the parameter collection.
-            for p, expr in original.items():
-                try:
-                    rp = adsk.fusion.Design.cast(app.activeProduct).allParameters.itemByName(p)
-                    if rp:
-                        rp.expression = expr
-                except Exception:
-                    pass
+            build_engine.restore_values(original)
             adsk.doEvents()
 
         # Phase 2: one output design per profile, laid out left-to-right. Only now
@@ -480,42 +405,16 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 pass
 
             x_cursor = 0.0
-            for safe_name, temp_bodies in variants:
-                tmps = [t for (t, _a, _m) in temp_bodies]
+            for safe_name, snaps in variants:
+                tmps = [s['temp'] for s in snaps]
                 min_x = min(tb.boundingBox.minPoint.x for tb in tmps)
                 max_x = max(tb.boundingBox.maxPoint.x for tb in tmps)
                 transform = adsk.core.Matrix3D.create()
                 transform.translation = adsk.core.Vector3D.create(x_cursor - min_x, 0.0, 0.0)
                 occ = root.occurrences.addNewComponent(transform)
                 occ.component.name = safe_name
-                base = occ.component.features.baseFeatures.add()
-                base.startEdit()
-                try:
-                    for tmp, _appr, _mat in temp_bodies:
-                        occ.component.bRepBodies.add(tmp, base)
-                finally:
-                    base.finishEdit()
-                # Re-apply the source look (temporary BReps lose material/appearance).
-                # The body objects returned during the base-feature edit go stale
-                # after finishEdit(), so fetch the component's bodies fresh and match
-                # them by index. Best-effort: the geometry is already built, so any
-                # failure just leaves the default look rather than breaking the build.
-                comp_bodies = occ.component.bRepBodies
-                for idx, (_tmp, appr, mat) in enumerate(temp_bodies):
-                    if idx >= comp_bodies.count:
-                        break
-                    nb = comp_bodies.item(idx)
-                    try:
-                        if mat:
-                            m = _material_in(nd, mat)
-                            if m:
-                                nb.material = m
-                        if appr:
-                            a = _appearance_in(nd, appr)
-                            if a:
-                                nb.appearance = a
-                    except Exception:
-                        pass  # geometry is built; a failed look just stays default
+                build_engine.add_snapshot(occ.component, snaps)
+                build_engine.reapply_looks(nd, occ.component, snaps)
                 x_cursor += (max_x - min_x) + spacing_cm
                 ctx['built'] += 1
             # Frame the finished layout. A fresh document opens with the default
@@ -799,7 +698,7 @@ def _preview_test_row(inputs):
         p = adsk.fusion.Design.cast(app.activeProduct).allParameters.itemByName(pname)
         if p:
             try:
-                apply_expression(p, val)
+                build_engine.apply_expression(p, val)
             except Exception:
                 pass  # a bad cell just doesn't preview; never crash the preview
 
