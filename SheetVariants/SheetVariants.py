@@ -40,6 +40,10 @@ sys.modules.pop('sheet_core', None)
 import sheet_core
 sys.modules.pop('build_engine', None)
 import build_engine
+sys.modules.pop('placeholder_core', None)
+import placeholder_core
+sys.modules.pop('placeholder_cmds', None)
+import placeholder_cmds
 
 app = adsk.core.Application.get()
 ui = app.userInterface
@@ -67,7 +71,7 @@ CSV_ONLY_TAB_LABEL = "— single sheet (read as CSV) —"
 
 # The sheet URL is remembered per design (as a document attribute), so each
 # design pre-fills its own sheet and a design with none set stays empty.
-DESIGN_ATTR_GROUP = 'SheetVariants'
+DESIGN_ATTR_GROUP = placeholder_core.ATTR_GROUP
 DESIGN_ATTR_URL = 'sheetUrl'
 
 CMD_ID = 'sheetVariantsBuildAssemblyCmd'
@@ -1005,6 +1009,11 @@ def cleanup_ui():
     on start, because a panel ID is unique per workspace: a panel left behind on
     another tab by a previous load would otherwise be reused instead of a fresh
     one being created on the MANAGE tab. Safe to call repeatedly."""
+    try:
+        placeholder_cmds.unregister()
+    except Exception:
+        pass
+
     cmd_ids = (CMD_ID, TEST_CMD_ID, TEMPLATE_CMD_ID)
     panel_ids = (PANEL_ID,) + OBSOLETE_PANEL_IDS
 
@@ -1076,6 +1085,7 @@ def run(context):
                     # Show both buttons directly on the panel (not just the overflow).
                     control.isPromoted = True
                     control.isPromotedByDefault = True
+            placeholder_cmds.register(panel)
     except Exception:
         if ui:
             ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))

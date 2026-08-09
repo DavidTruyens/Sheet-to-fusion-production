@@ -23,7 +23,7 @@ jobs:
       - name: Lint for real errors (pyflakes)
         run: |
           python -m pip install --upgrade pyflakes
-          pyflakes SheetVariants/SheetVariants.py SheetVariants/sheet_core.py SheetVariants/placeholder_core.py SheetVariants/build_engine.py
+          pyflakes SheetVariants/SheetVariants.py SheetVariants/sheet_core.py SheetVariants/placeholder_core.py SheetVariants/build_engine.py SheetVariants/placeholder_cmds.py
 
       - name: Run unit tests
         run: |
