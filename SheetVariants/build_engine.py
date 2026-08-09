@@ -105,13 +105,38 @@ def unrestored_values(values):
     document is left MODIFIED with a driven value still in place, which is a
     materially different, and worse, situation than "restore raised and was
     ignored" would suggest.
+
+    This is a plain STRING comparison (current expression vs. captured
+    expression), and it is sound only because of a round-trip invariant:
+    ``expected`` is exactly the string this module's own ``capture_values``
+    read from ``param.expression`` before anything was driven, and
+    ``restore_values`` writes that SAME string back into ``param.expression``
+    — never a reformatted, reparsed, or unit-converted version of it.
+    Whitespace, unit suffixes, numeric precision and locale decimal
+    separators all cancel out because they were already baked into the one
+    string this compares against itself. If a future change ever routes
+    ``restore_values`` through ``apply_expression`` (which re-quotes text
+    values) or captures/restores via ``param.value`` instead of
+    ``param.expression`` (a float, reformatted back into a string), this
+    comparison would start flagging clean restores as failures — a false
+    "your model is corrupted" message with nothing wrong underneath. Keep
+    ``restore_values`` writing back the exact captured expression string
+    verbatim if this function is to stay trustworthy.
+
+    Each parameter read is individually guarded: one parameter that cannot be
+    read (design gone stale, name no longer resolvable, etc.) is treated as
+    unrestored — failing toward a warning rather than toward silence — rather
+    than aborting the check for every other parameter.
     """
     design = _design()
     all_params = design.allParameters
     bad = []
     for name, expected in values.items():
-        param = all_params.itemByName(name)
-        current = param.expression if param else None
+        try:
+            param = all_params.itemByName(name)
+            current = param.expression if param else None
+        except Exception:
+            current = None
         if current != expected:
             bad.append(name)
     return bad

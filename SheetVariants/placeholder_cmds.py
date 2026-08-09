@@ -628,17 +628,23 @@ def _open_mother(file_id):
     return app.documents.open(data_file), True
 
 
-def _snapshot_for(design, setup, values, dims_cm):
+def _snapshot_for(setup, values, dims_cm, unrestored_names):
     """Drive the mother to one config-and-size and snapshot its solids, already
     transformed into the child's local space with the anchor at the origin.
 
-    ``design`` is re-derived fresh from ``app.activeProduct`` immediately below
-    rather than trusted as passed in: on the 2nd+ distinct size in a run, the
-    caller's handle has already survived one or more recomputes from earlier
-    calls, which is exactly what build_engine._design()'s docstring warns can
-    invalidate a held collection. The anchor read further down, after
-    apply_values(), already re-derives its own fresh handle — that part is
-    unchanged.
+    Takes no ``design`` argument — every read below re-derives the design
+    fresh from ``app.activeProduct`` instead. On the 2nd+ distinct size in a
+    run, a handle from an earlier call has already survived one or more
+    recomputes, which is exactly what build_engine._design()'s docstring
+    warns can invalidate a held collection. The anchor read further down,
+    after apply_values(), already re-derives its own fresh handle too.
+
+    ``unrestored_names`` is a ``set`` the caller owns across the whole run:
+    any parameter this call could not restore is added to it here rather than
+    surfaced with a message box in this function. Collecting into one set and
+    letting the caller show a single box once the progress dialog is hidden
+    avoids popping a modal warning while another modal dialog is still on
+    screen.
     """
     frame = placeholder_core.mother_frame(setup['front'])
     design = adsk.fusion.Design.cast(app.activeProduct)
@@ -658,7 +664,6 @@ def _snapshot_for(design, setup, values, dims_cm):
             raise RuntimeError('The mapped {} parameter "{}" is missing from this '
                                'mother.'.format(key, setup['params'][key]))
 
-    mother_name = design.parentDocument.name
     original = build_engine.capture_values(list(driven.keys()))
     try:
         build_engine.apply_values(driven)
@@ -674,20 +679,22 @@ def _snapshot_for(design, setup, values, dims_cm):
         snaps = build_engine.snapshot_bodies(bodies)
     finally:
         build_engine.restore_values(original)
-        adsk.doEvents()
+        try:
+            adsk.doEvents()
+        except Exception:
+            pass
         # restore_values() is deliberately best-effort per parameter, so a
         # failed write is otherwise invisible. Verify it actually happened —
         # even when the try above raised — because a mother silently left
         # holding a driven value is a document that isModified will then push
-        # the user to SAVE, permanently baking that driven value in.
-        unrestored = build_engine.unrestored_values(original)
-        if unrestored:
-            ui.messageBox(
-                'Fill Placeholders drove {} in "{}" and could NOT restore the '
-                'original value.\n\nThis mother is now left MODIFIED with a '
-                'driven value still applied. Close it WITHOUT SAVING — saving '
-                'now would make that value permanent.'
-                .format(', '.join(sorted(unrestored)), mother_name))
+        # the user to SAVE, permanently baking that driven value in. Guarded:
+        # a throw here must not replace whatever exception the try above may
+        # already be propagating, and must not stop the caller's own cleanup
+        # (progress.hide(), returning to the layout, closing the mother).
+        try:
+            unrestored_names.update(build_engine.unrestored_values(original))
+        except Exception:
+            pass
     build_engine.transform_snapshot(
         snaps, placeholder_core.local_matrix((point.x, point.y, point.z), frame))
     return snaps
@@ -736,6 +743,7 @@ def build_children(slots, mother, config):
     opened_by_us = False
     version = None
     cancelled_at = None
+    unrestored_names = set()
 
     # The progress dialog covers Phase 1 only: driving and recomputing the mother
     # is the slow part, while Phase 2 just copies snapshots that are already made.
@@ -784,14 +792,29 @@ def build_children(slots, mother, config):
                 key = tuple(round(v, 6) for v in slot['dims_cm'])
                 if key not in by_size:
                     try:
-                        by_size[key] = _snapshot_for(mother_design, setup, values,
-                                                     slot['dims_cm'])
+                        by_size[key] = _snapshot_for(setup, values, slot['dims_cm'],
+                                                     unrestored_names)
                     except Exception as err:
                         # One unusable slot must not cost the whole run.
                         failures.append('{} — {}'.format(slot['name'], err))
                 progress.progressValue = index + 1
         finally:
-            progress.hide()
+            try:
+                progress.hide()
+            except Exception:
+                pass
+
+        # Surface any restore failures ONE time, now that the progress dialog
+        # is (or at least was attempted to be) off screen — not per size, and
+        # not while a modal progress dialog is still up, which would just
+        # reintroduce the orphaned-dialog problem at a new site.
+        if unrestored_names:
+            ui.messageBox(
+                'Fill Placeholders could not restore {} to its original value '
+                'in "{}" after this run.\n\nThis mother is left MODIFIED with '
+                'a driven value still applied. Close it WITHOUT SAVING — '
+                'saving now would make that value permanent.'
+                .format(', '.join(sorted(unrestored_names)), mother['name']))
 
         # Phase 2 — back in the layout, but the mother is STILL OPEN: its
         # Appearance/Material objects, referenced live from the snapshots in
@@ -902,6 +925,9 @@ def build_children(slots, mother, config):
                 doc.close(False)
             except Exception:
                 pass
-        adsk.doEvents()
+        try:
+            adsk.doEvents()
+        except Exception:
+            pass
 
     return report + failures
