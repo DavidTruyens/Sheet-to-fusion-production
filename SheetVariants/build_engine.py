@@ -248,3 +248,85 @@ def reapply_looks(design, component, snaps):
                     body.appearance = appearance
         except Exception:
             pass  # geometry is built; a failed look just stays default
+
+
+def find_base_feature(component):
+    """The component's first base feature — the one this add-in created to hold
+    the mother's geometry. Returns None if it has been deleted."""
+    features = component.features.baseFeatures
+    return features.item(0) if features.count else None
+
+
+def base_feature_bodies(component, base):
+    """The bodies the base feature owns.
+
+    Spike 3 confirmed ``base.bodies`` stays populated once downstream features
+    exist (count 1 with a fillet on top), so it is the exact answer. The
+    positional fallback assumes the base feature's bodies are the component's
+    first N in creation order, which only holds while downstream features modify
+    rather than add bodies — it is a safety net, not the intended path.
+    """
+    try:
+        if base.bodies.count:
+            return [base.bodies.item(i) for i in range(base.bodies.count)]
+    except Exception:
+        pass
+    return [component.bRepBodies.item(i) for i in range(component.bRepBodies.count)]
+
+
+def rebuild_base_feature(component, base, snaps, ops):
+    """Swap a base feature's geometry in place so downstream features recompute
+    against the new bodies instead of being deleted along with the old ones.
+
+    ``ops`` comes from placeholder_core.pair_bodies and is already ordered
+    update-then-add-then-remove, so bodies are only deleted after every op that
+    still needs to read them.
+
+    Body references are resolved BEFORE startEdit(), and that ordering is load
+    bearing, not tidiness: startEdit() rolls the timeline back to this feature,
+    which recomputes and invalidates collections fetched across it. Spike 3 hit
+    "RuntimeError: 3 : Bad index parameter" doing it the other way round. (It
+    also keeps indices stable, since a removal would shift them.)
+
+    Spike 3 also established that base.bodies must be read INSIDE the edit: the
+    documented dual behaviour is real, and outside the edit it returns the
+    downstream RESULT body (a filleted 997.9) rather than the SOURCE body (1000.0)
+    that updateBody demands. Passing the result body fails with "Invalid argument
+    sourceBody. Not a source body for this base feature".
+
+    finishEdit() is where the designer's downstream features recompute, and it CAN
+    RAISE — spike 3 measured InternalValidationError when a fillet built on an edge
+    of the old geometry could not be rebuilt on the new. Raising there destroys
+    that feature and leaves the body unreadable. That is a per-child failure, not a
+    run-ending one, so it is caught and returned rather than propagated.
+
+    Returns "" on success, or a human-readable reason the rebuild failed.
+    """
+    existing = None
+    base.startEdit()
+    try:
+        # Inside the edit: base.bodies is now the base feature's SOURCE bodies.
+        existing = base_feature_bodies(component, base)
+        for kind, old_index, new_index in ops:
+            if kind == 'update':
+                base.updateBody(existing[old_index], snaps[new_index]['temp'])
+            elif kind == 'add':
+                component.bRepBodies.add(snaps[new_index]['temp'], base)
+            elif kind == 'remove':
+                existing[old_index].deleteMe()
+    except Exception as err:
+        try:
+            base.finishEdit()
+        except Exception:
+            pass
+        return 'geometry swap failed: {}'.format(err)
+    try:
+        base.finishEdit()
+    except Exception as err:
+        # A feature the designer built on the OLD geometry's topology (a fillet or
+        # chamfer on an edge, a sketch on a generated face) could not be recomputed
+        # against the new shape. Fusion destroys it and leaves the body unreadable.
+        return ('a feature built on the old geometry could not be recomputed '
+                '({}). Anchor cuts to origin planes rather than to generated '
+                'faces or edges.'.format(err))
+    return ''
