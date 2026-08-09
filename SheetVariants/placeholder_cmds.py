@@ -5,12 +5,15 @@
 # Imports adsk, so nothing here is unit-tested; the schemas, frames, extents,
 # matrices and body pairing all live in placeholder_core.py, which is.
 
+import datetime
 import os
 import sys
 import traceback
 
 import adsk.core
 import adsk.fusion
+
+import build_engine
 
 _ADDIN_DIR = os.path.dirname(os.path.realpath(__file__))
 if _ADDIN_DIR not in sys.path:
@@ -461,16 +464,17 @@ class FillExecuteHandler(adsk.core.CommandEventHandler):
             mother = _selected_mother(inputs)
             item = inputs.itemById('config').selectedItem
             config = item.name if item else ''
-            lines = ['DRY RUN — no geometry built yet.', '',
-                     'mother: {}'.format(mother['name'] if mother else '(none)'),
-                     'config: {}'.format(config), '']
-            for slot in slots:
-                width, depth, height = slot['dims_cm']
-                lines.append('{}  {:.1f} x {:.1f} x {:.1f} mm  slot={}'.format(
-                    slot['name'], width * 10, depth * 10, height * 10,
-                    slot['slotId'] or '(new)'))
-            lines.extend('! ' + p for p in problems)
-            ui.messageBox('\n'.join(lines))
+            if not mother or not config:
+                ui.messageBox('Pick a mother model and a config first.')
+                return
+            report = build_children(slots, mother, config)
+            import sheet_core
+            import SheetVariants
+            settings = sheet_core.load_settings(SheetVariants.SETTINGS_FILE)
+            sheet_core.remember_mother(settings, mother)
+            sheet_core.save_settings(SheetVariants.SETTINGS_FILE, settings)
+            lines = report + ['! ' + p for p in problems]
+            ui.messageBox('\n'.join(lines) if lines else 'Nothing was built.')
         except Exception:
             import traceback
             ui.messageBox('Fill Placeholders failed:\n' + traceback.format_exc())
@@ -534,3 +538,240 @@ def unregister():
             pass
     _handlers[:] = []
     _panel = None
+
+
+def attribute_list(found):
+    """Design.findAttributes() returns an **AttributeVector**, which is NOT a
+    Fusion collection — it has no .count or .item(i), and using them raises
+    AttributeError. Spike 2 confirmed this; len()/index is the working shape.
+    The .count branch is kept as a fallback for builds that expose the collection
+    shape instead."""
+    try:
+        return [found[i] for i in range(len(found))]
+    except (TypeError, AttributeError):
+        return [found.item(i) for i in range(found.count)]
+
+
+def find_slot_bodies(design):
+    """{slot id: body} for every placeholder in ``design``, in one call.
+
+    Used to re-find placeholder bodies AFTER a document switch has invalidated
+    the references captured during Phase 0."""
+    bodies = {}
+    for attribute in attribute_list(design.findAttributes(
+            placeholder_core.ATTR_GROUP, placeholder_core.SLOT_ID_ATTR)):
+        try:
+            bodies[attribute.value] = attribute.parent
+        except Exception:
+            continue
+    return bodies
+
+
+def _unique_component_name(root, wanted):
+    """``wanted``, suffixed _2, _3, ... if a component already has that name.
+
+    A child is named after its placeholder body so the browser reads like the
+    layout, but two boxes in different components may share a name and Fusion will
+    not silently disambiguate them for us."""
+    taken = set()
+    for occurrence in root.occurrences:
+        try:
+            taken.add(occurrence.component.name)
+        except Exception:
+            continue
+    if wanted not in taken:
+        return wanted
+    index = 2
+    while '{}_{}'.format(wanted, index) in taken:
+        index += 1
+    return '{}_{}'.format(wanted, index)
+
+
+def _row_values(rows, config):
+    """{parameter name: cell} for the row whose Name column is ``config``."""
+    header = [h.strip() for h in rows[0]]
+    for row in rows[1:]:
+        if (row[0] or '').strip() == config:
+            return {name: (row[i].strip() if i < len(row) else '')
+                    for i, name in enumerate(header) if i > 0 and name}
+    raise RuntimeError('Config "{}" is no longer in the sheet.'.format(config))
+
+
+def _cm(value):
+    """A parameter expression for a length in Fusion's internal centimetres."""
+    return '{:.6f} cm'.format(value)
+
+
+def _open_mother(file_id):
+    """(document, opened_by_us). Reuses an already-open document; refuses one with
+    unsaved changes, because a run edits and restores its parameters and a crash
+    partway would leave someone else's work in a variant state."""
+    for i in range(app.documents.count):
+        doc = app.documents.item(i)
+        try:
+            if doc.dataFile and doc.dataFile.id == file_id:
+                if doc.isModified:
+                    raise RuntimeError(
+                        'The mother "{}" has unsaved changes. Save or discard them '
+                        'before filling placeholders.'.format(doc.name))
+                return doc, False
+        except AttributeError:
+            continue
+    data_file = app.data.findFileById(file_id)
+    if not data_file:
+        raise RuntimeError('The mother model could not be found in your projects.')
+    return app.documents.open(data_file), True
+
+
+def _snapshot_for(design, setup, values, dims_cm):
+    """Drive the mother to one config-and-size and snapshot its solids, already
+    transformed into the child's local space with the anchor at the origin."""
+    frame = placeholder_core.mother_frame(setup['front'])
+    origins = design.rootComponent.jointOrgins
+    origin = origins.itemByName(setup['anchor'])
+    if not origin:
+        raise RuntimeError(
+            'The anchor joint origin "{}" is missing from this mother.'
+            .format(setup['anchor']))
+
+    driven = dict(values)
+    driven[setup['params']['width']] = _cm(dims_cm[0])
+    driven[setup['params']['depth']] = _cm(dims_cm[1])
+    driven[setup['params']['height']] = _cm(dims_cm[2])
+    for key in ('width', 'depth', 'height'):
+        if not design.allParameters.itemByName(setup['params'][key]):
+            raise RuntimeError('The mapped {} parameter "{}" is missing from this '
+                               'mother.'.format(key, setup['params'][key]))
+
+    original = build_engine.capture_values(list(driven.keys()))
+    try:
+        build_engine.apply_values(driven)
+        adsk.doEvents()
+        fresh = adsk.fusion.Design.cast(app.activeProduct)
+        # The anchor moves with the model, so read it AFTER the recompute.
+        point = fresh.rootComponent.jointOrgins.itemByName(
+            setup['anchor']).geometry.origin
+        bodies = []
+        for occurrence in fresh.rootComponent.allOccurrences:
+            bodies.extend(b for b in occurrence.bRepBodies if b.isSolid)
+        bodies.extend(b for b in fresh.rootComponent.bRepBodies if b.isSolid)
+        snaps = build_engine.snapshot_bodies(bodies)
+    finally:
+        build_engine.restore_values(original)
+        adsk.doEvents()
+    build_engine.transform_snapshot(
+        snaps, placeholder_core.local_matrix((point.x, point.y, point.z), frame))
+    return snaps
+
+
+def build_children(slots, mother, config):
+    """Phases 1 and 2: drive the mother once per distinct size, then create a child
+    component per slot in the layout document.
+
+    Returns one report line per slot. A slot that cannot be built contributes a
+    failure line and is skipped; it never aborts the run, so one bad box does not
+    cost you the whole kitchen.
+    """
+    layout_doc = app.activeDocument
+    rows_url, rows_tab = mother['sheetUrl'], mother['tab'] or None
+    import SheetVariants
+    values = _row_values(SheetVariants.get_rows(rows_url, rows_tab), config)
+
+    # Stamp slot ids NOW, while the layout is still active and Phase 0's body
+    # references are still alive. Opening the mother below invalidates every live
+    # reference to this design, so this is the last moment those bodies can be
+    # touched. From here on a slot is identified only by its id string, and the
+    # body is re-found by attribute in Phase 2.
+    for slot in slots:
+        try:
+            slot['slotId'] = ensure_slot_id(slot['body'])
+        except Exception:
+            slot['slotId'] = ''
+        slot.pop('body', None)   # dead weight from here on — never dereference it
+
+    # The progress dialog covers Phase 1 only: driving and recomputing the mother
+    # is the slow part, while Phase 2 just copies snapshots that are already made.
+    progress = ui.createProgressDialog()
+    progress.isCancelButtonShown = True
+    progress.show('Filling placeholders', 'Placeholder %v of %m', 0, len(slots), 0)
+    failures = []
+
+    # Phase 1 — everything that needs the mother, with the layout in the background.
+    doc, opened_by_us = _open_mother(mother['fileId'])
+    version = doc.dataFile.versionNumber if doc.dataFile else None
+    by_size = {}
+    try:
+        doc.activate()
+        adsk.doEvents()
+        mother_design = adsk.fusion.Design.cast(app.activeProduct)
+        setup = placeholder_core.migrate_mother_setup(read_mother_setup(mother_design))
+        errors = placeholder_core.validate_mother_setup(setup)
+        if errors:
+            raise RuntimeError('"{}" is not fully prepared:\n• {}'
+                               .format(mother['name'], '\n• '.join(errors)))
+        # One drive per DISTINCT size: a run of identical units costs one recompute.
+        for index, slot in enumerate(slots):
+            if progress.wasCancelled:
+                raise RuntimeError('Cancelled by user.')
+            key = tuple(round(v, 6) for v in slot['dims_cm'])
+            if key not in by_size:
+                try:
+                    by_size[key] = _snapshot_for(mother_design, setup, values,
+                                                 slot['dims_cm'])
+                except Exception as err:
+                    # One unusable slot must not cost the whole run.
+                    failures.append('{} — {}'.format(slot['name'], err))
+            progress.progressValue = index + 1
+    finally:
+        if opened_by_us:
+            doc.close(False)
+        adsk.doEvents()
+        progress.hide()
+
+    # Phase 2 — back in the layout, with every snapshot already in hand.
+    layout_doc.activate()
+    adsk.doEvents()
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    root = design.rootComponent
+    tbm = adsk.fusion.TemporaryBRepManager.get()
+    built_at = datetime.datetime.now().isoformat(timespec='seconds')
+    # Re-resolve the placeholder bodies AFTER the document switch. The references
+    # captured in Phase 0 are dead; these are looked up fresh by the slot ids
+    # stamped above.
+    slot_bodies = find_slot_bodies(design)
+    report = []
+    for slot in slots:
+        key = tuple(round(v, 6) for v in slot['dims_cm'])
+        template = by_size.get(key)
+        if template is None:
+            continue  # its failure is already recorded
+        # Copy again per slot: identical units share one recompute, not one body.
+        snaps = [{'temp': tbm.copy(s['temp']), 'appearance': s['appearance'],
+                  'material': s['material'], 'name': s['name']} for s in template]
+
+        matrix = adsk.core.Matrix3D.create()
+        matrix.setWithArray(slot['matrix'])
+        occurrence = root.occurrences.addNewComponent(matrix)
+        occurrence.component.name = _unique_component_name(root, slot['name'])
+        build_engine.add_snapshot(occurrence.component, snaps)
+        build_engine.reapply_looks(design, occurrence.component, snaps)
+
+        recipe = placeholder_core.new_child_recipe(
+            slot_id=slot['slotId'],
+            mother={'fileId': mother['fileId'], 'name': mother['name'],
+                    'version': version},
+            config=config, sheet_url=rows_url, tab=mother['tab'],
+            dims_cm=slot['dims_cm'],
+            bodies=[s['name'] for s in snaps],
+            built_at=built_at)
+        occurrence.component.attributes.add(
+            placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
+            placeholder_core.dumps_attr(recipe))
+        body = slot_bodies.get(slot['slotId'])
+        if body is not None:
+            try:
+                body.isLightBulbOn = False
+            except Exception:
+                pass
+        report.append('{} — built {} bodies'.format(slot['name'], len(snaps)))
+    return report + failures
