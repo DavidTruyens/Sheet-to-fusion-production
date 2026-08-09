@@ -652,6 +652,7 @@ def find_children(design):
         except Exception:
             continue
     nested_names = None  # computed lazily: only needed when a name misses above
+    nested_unavailable = False
     for attribute in attribute_list(design.findAttributes(
             placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR)):
         try:
@@ -666,13 +667,32 @@ def find_children(design):
         if occurrence:
             found[recipe['slotId']] = (occurrence, recipe)
             continue
-        if nested_names is None:
+        if nested_names is None and not nested_unavailable:
             nested_names = set()
-            for occ in design.rootComponent.allOccurrences:
-                try:
-                    nested_names.add(occ.component.name)
-                except Exception:
-                    continue
+            try:
+                for occ in design.rootComponent.allOccurrences:
+                    try:
+                        nested_names.add(occ.component.name)
+                    except Exception:
+                        continue
+            except Exception:
+                # The COLLECTION access itself failed, not one item. Guarding
+                # only per-item would let this escape find_children entirely,
+                # collapsing both dicts and reading every already-filled slot as
+                # unfilled — which builds a SECOND child on top of each existing
+                # one and strands the designer's downstream features in the
+                # orphan. Refusing is the safe degradation: without this list we
+                # cannot tell "moved into a sub-assembly" from "deleted", and
+                # wrongly refusing a slot is loud and recoverable where wrongly
+                # duplicating one is neither.
+                nested_names = None
+                nested_unavailable = True
+        if nested_unavailable:
+            moved[recipe['slotId']] = (
+                'its child "{}" could not be located — Fusion did not return the '
+                'component list, so it was left alone rather than risk building '
+                'a duplicate on top of it'.format(component_name))
+            continue
         if component_name in nested_names:
             moved[recipe['slotId']] = (
                 'its child "{}" has been moved into a sub-assembly — move it '

@@ -155,10 +155,11 @@ FAIL: a second child built on top of the first.
 
 ## Known residuals — not blocking, recorded deliberately
 
-1. **`find_children`'s `allOccurrences` access is unguarded** (the per-item body is
-   guarded, the collection access is not). If it raises, both lookups collapse and
-   every filled child is duplicated — the exact harm that detection closes. **One-line
-   fix, and the only residual worth closing before this reaches other users.**
+1. ~~`find_children`'s `allOccurrences` access is unguarded.~~ **Fixed before merge.**
+   The collection access is now guarded, and when it fails the slot is *refused*
+   rather than falling through: without that list we cannot tell "moved into a
+   sub-assembly" from "deleted", and wrongly refusing a slot is loud and
+   recoverable where wrongly duplicating one is neither.
 2. **The README's recovery claim is conditionally true.** Re-filling recovers a
    same-body-count failure; a body-count-changing failure refuses loudly instead.
 3. **Pinned tab is keyed by spreadsheet id, not mother** — see item 10.
