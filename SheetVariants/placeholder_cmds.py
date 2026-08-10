@@ -120,8 +120,9 @@ class PrepareCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 inputs.addTextBoxCommandInput(
                     'err', '',
                     'This model has no joint origins. Create one at the point '
-                    'that should land at the centre of a placeholder box '
-                    '(Assemble > Joint Origin), then run this command again.',
+                    'that should line up with the placeholder box (a face centre '
+                    'is fine — you say which reference point it lands on below). '
+                    'Use Assemble > Joint Origin, then run this again.',
                     4, True)
                 return
 
@@ -133,6 +134,16 @@ class PrepareCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 missing.append('anchor')
             _add_dropdown(inputs, 'front', 'Front faces along',
                           list(placeholder_core.FRONT_AXES), setup['front'])
+            # Which reference point of the BOX the anchor lands on. Fusion snaps
+            # a joint origin to face centres readily but gives you no easy way to
+            # snap to a model's centre, so forcing "anchor == box centre" made an
+            # anchor on the front face place every child half a depth too far
+            # back. Let the author say what their anchor means instead.
+            _add_dropdown(
+                inputs, 'anchorAt', 'Anchor lands on',
+                [placeholder_core.ANCHOR_AT_LABELS[k]
+                 for k in placeholder_core.ANCHOR_AT_CHOICES],
+                placeholder_core.ANCHOR_AT_LABELS[setup['anchorAt']])
             dimension_drops = []
             for input_id, label, key in (('pWidth', 'Width parameter', 'width'),
                                          ('pDepth', 'Depth parameter', 'depth'),
@@ -201,9 +212,15 @@ class PrepareExecuteHandler(adsk.core.CommandEventHandler):
                 item = inputs.itemById(input_id).selectedItem
                 return item.name if item else ''
 
+            # The dropdown shows human labels; the attribute stores the key.
+            # An unrecognised label falls through to migrate_mother_setup's own
+            # default rather than being written out as-is.
+            by_label = {label: key for key, label
+                        in placeholder_core.ANCHOR_AT_LABELS.items()}
             setup = placeholder_core.migrate_mother_setup({
                 'anchor': picked('anchor'),
                 'front': picked('front'),
+                'anchorAt': by_label.get(picked('anchorAt')),
                 'params': {'width': picked('pWidth'),
                            'depth': picked('pDepth'),
                            'height': picked('pHeight')},
@@ -215,9 +232,12 @@ class PrepareExecuteHandler(adsk.core.CommandEventHandler):
                 return
             write_mother_setup(design, setup)
             ui.messageBox(
-                'Prepared "{}".\n\nanchor: {}\nfront: {}\nwidth: {}\ndepth: {}\n'
-                'height: {}\n\nSave the document to keep this.'
-                .format(design.parentDocument.name, setup['anchor'], setup['front'],
+                'Prepared "{}".\n\nanchor: {} lands on the {}\nfront: {}\n'
+                'width: {}\ndepth: {}\nheight: {}\n\n'
+                'Save the document to keep this.'
+                .format(design.parentDocument.name, setup['anchor'],
+                        placeholder_core.ANCHOR_AT_LABELS[setup['anchorAt']],
+                        setup['front'],
                         setup['params']['width'], setup['params']['depth'],
                         setup['params']['height']))
         except Exception:
@@ -322,7 +342,12 @@ def resolve_slots(faces):
             'body': body,
             'slotId': read_slot_id(body),
             'dims_cm': (width, depth, height),
-            'matrix': placeholder_core.occurrence_matrix(centre, frame),
+            # The placement matrix is NOT built here. Which reference point of
+            # the box the mother's anchor lands on is a property of the MOTHER
+            # (its anchorAt), and no mother has been chosen yet at this point.
+            # Phase 2 composes the matrix once the mother's setup is known.
+            'centre': centre,
+            'frame': frame,
             'name': name,
         })
     return slots, problems
@@ -682,7 +707,7 @@ def find_children(design):
     walked for that part. The attribute is written on the component, so its
     occurrence is found by matching component names against the root's DIRECT
     occurrences only — never ``allOccurrences`` (recursive/document-wide):
-    build_children applies ``slot['matrix']``, a WORLD matrix, straight to
+    build_children composes a WORLD matrix per slot and applies it straight to
     ``occurrence.transform2``, but a nested occurrence's ``transform2`` is
     relative to its PARENT occurrence, not world. Resolving through
     ``allOccurrences`` would silently place a nested child wrongly rather than
@@ -1152,6 +1177,16 @@ def build_children(slots, mother, config):
             occurrence = None
             created = False
             try:
+                # Compose the placement HERE, not in resolve_slots: it depends on
+                # the mother's anchorAt, which was unknown until the mother was
+                # opened. anchor_target picks which reference point of the box the
+                # mother's anchor lands on; occurrence_matrix then puts the
+                # child's local origin (the anchor, after local_matrix) there.
+                slot_matrix = placeholder_core.occurrence_matrix(
+                    placeholder_core.anchor_target(
+                        slot['centre'], slot['frame'], slot['dims_cm'],
+                        setup['anchorAt']),
+                    slot['frame'])
                 # Copy again per slot: identical units share one recompute, not
                 # one body.
                 snaps = [{'temp': tbm.copy(s['temp']), 'appearance': s['appearance'],
@@ -1171,7 +1206,7 @@ def build_children(slots, mother, config):
                     # wording, which is prose for the user, not a control signal.
                     occurrence, old_recipe = existing
                     ok, line = rebuild_child(design, occurrence, old_recipe, snaps,
-                                             slot['matrix'])
+                                             slot_matrix)
                     if not ok:
                         # The geometry may be in a bad state: do not stamp a new
                         # recipe over it or touch the box below. Leave the last
@@ -1192,7 +1227,7 @@ def build_children(slots, mother, config):
                         placeholder_core.pair_bodies(old_recipe['bodies'], new_names))
                 else:
                     matrix = adsk.core.Matrix3D.create()
-                    matrix.setWithArray(slot['matrix'])
+                    matrix.setWithArray(slot_matrix)
                     occurrence = root.occurrences.addNewComponent(matrix)
                     created = True
                     occurrence.component.name = _unique_component_name(root, slot['name'])

@@ -198,13 +198,27 @@ parametric model. The box's size drives the model; its front face sets which way
 the result faces.
 
 **1. Prepare the mother.** Open your parametric model, add a joint origin at the
-point that should sit at the centre of a placeholder box, and run **Prepare Mother
-Model**. Pick that joint origin as the anchor, say which axis points out of its
-front, and map its width, depth and height parameters. This is stored on the
-document, so it travels with the file.
+point you want to line up with the placeholder box, and run **Prepare Mother
+Model**. Pick that joint origin as the anchor, say **what it lands on**, say which
+axis points out of the front, and map its width, depth and height parameters. This
+is stored on the document, so it travels with the file.
 
-The anchor is the only positioning control: to shift the model inside its box,
-move the joint origin.
+**Anchor lands on** is the one that matters most. Fusion snaps a joint origin to a
+face centre easily, so put yours somewhere convenient and then say what it means:
+
+| Anchor lands on | Use it when |
+|---|---|
+| centre of the box | your joint origin is at the middle of the model |
+| centre of the box's front face | your joint origin sits on the model's front face |
+| centre of the box's bottom face | the unit stands on the floor |
+| middle of the box's bottom front edge | floor-standing and flush to the front — usually what a kitchen unit wants |
+
+Get this wrong and nothing errors: the cabinet is simply offset inside its box, by
+half a depth or half a height. If your children come out shifted by exactly half of
+something, this is the setting to check first.
+
+Beyond that, the anchor is the positioning control: to nudge the model within its
+box, move the joint origin.
 
 **2. Lay out the boxes.** In your layout design, model one box body per slot —
 sketch and extrude them however you like, conventionally grouped in a `Layout`

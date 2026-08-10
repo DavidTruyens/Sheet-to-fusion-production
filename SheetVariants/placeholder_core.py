@@ -36,8 +36,54 @@ def loads_attr(text, migrate):
     return migrate(data)
 
 
+# Which reference point of the placeholder box the mother's anchor lands on.
+#
+# The first version of this feature had no choice here: the anchor always landed
+# on the box's CENTRE. That only works if the mother's author put the joint
+# origin at the model's centre — and Fusion gives you no easy way to snap to
+# that, while it snaps to face centres readily. An anchor created on the front
+# face therefore placed every child half a depth too far back, which is exactly
+# how it failed in practice. So the author now says what their anchor means.
+ANCHOR_CENTRE = "centre"
+ANCHOR_FRONT_CENTRE = "front_centre"
+ANCHOR_BOTTOM_CENTRE = "bottom_centre"
+ANCHOR_BOTTOM_FRONT_CENTRE = "bottom_front_centre"
+
+ANCHOR_AT_CHOICES = (ANCHOR_CENTRE, ANCHOR_FRONT_CENTRE,
+                     ANCHOR_BOTTOM_CENTRE, ANCHOR_BOTTOM_FRONT_CENTRE)
+
+# Human labels for the dialog, in the same order.
+ANCHOR_AT_LABELS = {
+    ANCHOR_CENTRE: "centre of the box",
+    ANCHOR_FRONT_CENTRE: "centre of the box's front face",
+    ANCHOR_BOTTOM_CENTRE: "centre of the box's bottom face",
+    ANCHOR_BOTTOM_FRONT_CENTRE: "middle of the box's bottom front edge",
+}
+
+
+def anchor_target(centre, frame, dims_cm, anchor_at):
+    """The world point the mother's anchor should land on.
+
+    ``centre`` and ``dims_cm`` come from extents_in_frame; ``frame`` is
+    (width, depth, up). "Front" is the -depth end of the box, because depth runs
+    INTO the volume from the selected front face, and "bottom" is the -up end.
+
+    An unrecognised choice falls back to the centre rather than raising: a
+    hand-edited or future-version attribute should misplace nothing worse than
+    the original behaviour did.
+    """
+    _width, depth, up = frame
+    _w, d, h = dims_cm
+    back_off = d / 2.0 if anchor_at in (ANCHOR_FRONT_CENTRE,
+                                        ANCHOR_BOTTOM_FRONT_CENTRE) else 0.0
+    down_off = h / 2.0 if anchor_at in (ANCHOR_BOTTOM_CENTRE,
+                                        ANCHOR_BOTTOM_FRONT_CENTRE) else 0.0
+    return tuple(centre[k] - depth[k] * back_off - up[k] * down_off
+                 for k in range(3))
+
+
 def default_mother_setup():
-    return {"v": 1, "anchor": "", "front": "-Y",
+    return {"v": 1, "anchor": "", "front": "-Y", "anchorAt": ANCHOR_CENTRE,
             "params": {"width": "", "depth": "", "height": ""}}
 
 
@@ -47,10 +93,14 @@ def migrate_mother_setup(data):
     params = data.get("params")
     params = params if isinstance(params, dict) else {}
     front = data.get("front")
+    anchor_at = data.get("anchorAt")
     return {
         "v": 1,
         "anchor": str(data.get("anchor") or ""),
         "front": front if front in FRONT_AXES else "-Y",
+        # A mother prepared before this field existed keeps the original
+        # centre-based behaviour rather than silently moving its children.
+        "anchorAt": anchor_at if anchor_at in ANCHOR_AT_CHOICES else ANCHOR_CENTRE,
         "params": {k: str(params.get(k) or "")
                    for k in ("width", "depth", "height")},
     }

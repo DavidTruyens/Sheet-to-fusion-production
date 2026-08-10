@@ -19,6 +19,13 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
   layout, pick a prepared mother, and each box gets a child component driven to
   that box's own size and orientation. The anchor lands at the box centre; the
   box is hidden, never deleted.
+- **The anchor's meaning is yours to choose.** Prepare Mother Model asks what the
+  anchor joint origin lands on: the box's centre, its front-face centre, its
+  bottom-face centre, or the middle of its bottom front edge. Fusion snaps a joint
+  origin to a face centre readily but offers no easy way to snap to a model's
+  centre, so assuming "anchor = box centre" placed a front-face anchor half a
+  depth too far back. If children come out offset by exactly half of something,
+  this is the setting to check.
 - **A sheet config is optional.** By default each box drives only the mother's
   width, depth and height and no sheet is read at all, so a mother that was
   never linked to one still works. Pick a config row when you want the sheet to
