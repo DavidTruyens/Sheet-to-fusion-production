@@ -751,6 +751,11 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             _build_report['ok'] = True
 
             cmd = args.command
+            # Switching documents (or starting any other command) PRE-EMPTS this
+            # one, and Fusion's default is to execute a pre-empted command "as if
+            # the user clicked OK". For this dialog that silently kicks off a full
+            # build the user never asked for. Terminate instead.
+            cmd.isExecutedWhenPreEmpted = False
             cmd.setDialogInitialSize(560, 460)
             inputs = cmd.commandInputs
 
@@ -958,6 +963,7 @@ class TemplateCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
             cmd = args.command
+            cmd.isExecutedWhenPreEmpted = False   # see CommandCreatedHandler
             cmd.setDialogInitialSize(380, 120)
             inputs = cmd.commandInputs
 

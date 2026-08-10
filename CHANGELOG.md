@@ -16,9 +16,13 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
   anchor, and which way it faces. Stored on the document, so it travels with
   the file.
 - **Fill Placeholders** — select the front face of each placeholder box in a
-  layout, pick a prepared mother and one config row from its sheet, and each
-  box gets a child component driven to that box's own size and orientation.
-  The anchor lands at the box centre; the box is hidden, never deleted.
+  layout, pick a prepared mother, and each box gets a child component driven to
+  that box's own size and orientation. The anchor lands at the box centre; the
+  box is hidden, never deleted.
+- **A sheet config is optional.** By default each box drives only the mother's
+  width, depth and height and no sheet is read at all, so a mother that was
+  never linked to one still works. Pick a config row when you want the sheet to
+  set everything else as well.
 - **Rebuilds preserve your edits.** Re-running Fill on a filled box swaps the
   geometry inside its base feature via `updateBody()`: a cut anchored to an
   origin plane recomputes against the new shape instead of being deleted with
