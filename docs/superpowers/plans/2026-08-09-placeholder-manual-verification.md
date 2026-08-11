@@ -8,6 +8,30 @@ list is the only actual verification the feature gets.
 Ordered by value. **Items 1–6 are worth the session**; 7–14 are cheap
 confirmations you can batch at the end.
 
+## Results so far (session of 2026-08-10/11, Fusion Personal, macOS)
+
+| # | Result |
+|---|---|
+| 1 | **PASS** — reported fine. Materials and appearances confirmed carrying over, including on the path where the tool opens and closes the mother itself, which is what the deferred-close fix was for |
+| 2 | **PASS** — after the anchor fix. Originally failed: every child sat half a depth too far back |
+| 3 | **PASS** |
+| 4 | **PASS** — a reported appearance problem turned out to be a panel with no appearance in the mother itself, faithfully copied. Not a defect |
+| 5–15 | not yet run |
+
+Found by using it, not by review — all now fixed and released in 1.15.0:
+
+- The anchor always landed on the box's **centre**, which only works if the joint
+  origin is at the model's centre. Fusion snaps to face centres instead, so a
+  front-face anchor put every child half a depth back. Now the author says what
+  the anchor lands on.
+- The two new buttons were registered but never **promoted**, so they sat in the
+  panel's overflow menu and looked entirely absent.
+- Switching to another design **executed** the open dialog as if OK had been
+  clicked (Fusion's documented default for a pre-empted command), silently
+  starting a whole build. Affected the shipped Build Variants dialog too.
+- A sheet config was mandatory; it is now optional, which is what made testing
+  without a linked sheet possible at all.
+
 **Do item 1 before touching any placeholder work** — it is the only thing here
 that can have broken something already shipped and released.
 
