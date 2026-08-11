@@ -535,3 +535,61 @@ def test_pair_bodies_fed_resulting_names_is_a_stable_no_op():
         ops2 = pc.pair_bodies(resulting, new)
         kinds = [op[0] for op in ops2]
         assert kinds == ["update"] * len(new), (old, new, resulting, ops2)
+
+
+# --- anchor_target: what point of the box the mother's anchor lands on --------
+
+def _frame_and_box():
+    """A -Y-facing frame and a 60 x 58 x 72 box centred at (10, 20, 36)."""
+    frame = pc.target_frame((0.0, -1.0, 0.0))   # w=+X, d=+Y, u=+Z
+    return frame, (10.0, 20.0, 36.0), (60.0, 58.0, 72.0)
+
+
+def test_anchor_target_centre_is_the_box_centre():
+    frame, centre, dims = _frame_and_box()
+    assert _close(pc.anchor_target(centre, frame, dims, pc.ANCHOR_CENTRE), centre)
+
+
+def test_anchor_target_front_centre_moves_against_the_depth_axis():
+    frame, centre, dims = _frame_and_box()
+    got = pc.anchor_target(centre, frame, dims, pc.ANCHOR_FRONT_CENTRE)
+    # depth axis is +Y, so the FRONT of the box is at the -Y end: 20 - 58/2.
+    assert _close(got, (10.0, 20.0 - 29.0, 36.0))
+
+
+def test_anchor_target_bottom_centre_moves_down_by_half_the_height():
+    frame, centre, dims = _frame_and_box()
+    got = pc.anchor_target(centre, frame, dims, pc.ANCHOR_BOTTOM_CENTRE)
+    assert _close(got, (10.0, 20.0, 36.0 - 36.0))
+
+
+def test_anchor_target_bottom_front_centre_moves_on_both_axes():
+    frame, centre, dims = _frame_and_box()
+    got = pc.anchor_target(centre, frame, dims, pc.ANCHOR_BOTTOM_FRONT_CENTRE)
+    assert _close(got, (10.0, 20.0 - 29.0, 36.0 - 36.0))
+
+
+def test_anchor_target_follows_a_rotated_frame():
+    # Front face pointing +X, so depth runs -X and the box's front is at +X.
+    frame = pc.target_frame((1.0, 0.0, 0.0))
+    got = pc.anchor_target((0.0, 0.0, 0.0), frame, (60.0, 58.0, 72.0),
+                           pc.ANCHOR_FRONT_CENTRE)
+    assert _close(got, (29.0, 0.0, 0.0))
+
+
+def test_anchor_target_unknown_choice_falls_back_to_centre():
+    frame, centre, dims = _frame_and_box()
+    assert _close(pc.anchor_target(centre, frame, dims, "nonsense"), centre)
+
+
+def test_mother_setup_defaults_anchor_at_to_centre():
+    assert pc.migrate_mother_setup({})["anchorAt"] == pc.ANCHOR_CENTRE
+
+
+def test_mother_setup_keeps_a_known_anchor_at():
+    s = pc.migrate_mother_setup({"anchorAt": pc.ANCHOR_BOTTOM_FRONT_CENTRE})
+    assert s["anchorAt"] == pc.ANCHOR_BOTTOM_FRONT_CENTRE
+
+
+def test_mother_setup_rejects_an_unknown_anchor_at():
+    assert pc.migrate_mother_setup({"anchorAt": "sideways"})["anchorAt"] == pc.ANCHOR_CENTRE
