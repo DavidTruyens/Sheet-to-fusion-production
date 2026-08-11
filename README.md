@@ -245,8 +245,13 @@ is rebuilt **in place**, so features you added yourself survive when they don't
 depend on the shape being replaced: a cut sketched on an origin plane is re-applied
 to the new geometry at full depth, whatever size the box changed to.
 
-A fillet or chamfer on a generated edge, or a sketch on a generated face, does not
-survive — that edge or face is gone once the shape changes. It's **reported, not
+A fillet or chamfer on a generated edge, or a sketch on a generated face, survives
+only as long as the edge or face it was built on still exists after the change. A
+resize that keeps the shape recognisable usually recomputes fine; a config that
+changes which bodies exist, or how they are shaped, is what takes the reference
+away. So this is not "fillets never survive" — it is "a feature anchored to
+generated geometry is only as durable as that geometry". When it does break, it's
+**reported, not
 silent**: the child comes back as `rebuild failed`. By then the geometry swap has
 already happened, so this is not a no-op — the downstream feature that couldn't
 recompute is destroyed, and the child can be left in a bad, half-updated state
