@@ -9,6 +9,28 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
 - **Filter by thickness** — filter which variants or components are built/exported
   by their material thickness.
 
+## 1.15.0 — Placeholder fixes from first real use
+
+Everything below was found by using 1.14.0 in Fusion, not by review.
+
+- **The anchor's meaning is yours to choose.** Prepare Mother Model asks what the
+  anchor joint origin lands on: the box's centre, its front-face centre, its
+  bottom-face centre, or the middle of its bottom front edge. Fusion snaps a joint
+  origin to a face centre readily but offers no easy way to snap to a model's
+  centre, so assuming "anchor = box centre" placed a front-face anchor exactly
+  half a depth too far back. If children come out offset by half of something,
+  this is the setting to check.
+- **A sheet config is optional** — see the 1.14.0 notes below.
+- **The new buttons are visible.** They were registered but never promoted, so they
+  sat in the panel's overflow menu and looked absent entirely.
+- **Dialogs no longer run themselves when pre-empted.** Switching to another design
+  while a dialog was open executed the command as if OK had been clicked — Fusion's
+  documented default — which silently started a whole build. Affected the shipped
+  Build Variants dialog too.
+- Prepare Mother Model warns when two dimensions map to the same parameter, which
+  is what every dropdown defaulting to the first parameter would otherwise save
+  unnoticed.
+
 ## 1.14.0 — Placeholder instantiation
 
 - **Prepare Mother Model** — record on a saved parametric document which
