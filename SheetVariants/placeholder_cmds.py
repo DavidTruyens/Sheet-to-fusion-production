@@ -1249,7 +1249,11 @@ def build_children(slots, mother, config):
                     config=config, sheet_url=rows_url, tab=(rows_tab or ''),
                     dims_cm=slot['dims_cm'],
                     bodies=body_names,
-                    built_at=built_at)
+                    built_at=built_at,
+                    # Record the rule that actually placed this child, so Update
+                    # Children can recompute the placement it SHOULD have and
+                    # spot a moved box without opening the mother.
+                    anchor_at=setup['anchorAt'])
                 occurrence.component.attributes.add(
                     placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
                     placeholder_core.dumps_attr(recipe))

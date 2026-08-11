@@ -145,11 +145,20 @@ def _version(value):
 
 
 def new_child_recipe(slot_id, mother, config, sheet_url, tab, dims_cm,
-                     bodies, built_at):
+                     bodies, built_at, anchor_at=""):
     """The record a child carries so it can be rebuilt later.
 
     ``built_at`` is supplied by the caller rather than generated here, so this
     module stays free of wall-clock dependencies and its tests stay deterministic.
+
+    ``anchor_at`` records which reference point of the box the mother's anchor was
+    placed on WHEN THIS CHILD WAS BUILT. It is deliberately stored rather than
+    re-read from the mother, for the same reason ``dims_cm`` is: detecting that a
+    box has moved means recomputing the placement the child *should* have and
+    comparing, and that recomputation needs the rule that was actually applied.
+    Reading the mother's current setting instead would need every mother opened
+    just to draw a dialog, and would call a child "moved" when in fact its
+    mother's rule had changed — a different thing, needing a different message.
     """
     mother = mother if isinstance(mother, dict) else {}
     w, d, h = dims_cm
@@ -165,6 +174,10 @@ def new_child_recipe(slot_id, mother, config, sheet_url, tab, dims_cm,
         "dims_cm": {"w": _float(w), "d": _float(d), "h": _float(h)},
         "bodies": [str(b) for b in (bodies or [])],
         "builtAt": str(built_at or ""),
+        # "" means UNKNOWN, not "centre". A child built before this field existed
+        # was placed by a rule we cannot recover, and guessing "centre" would make
+        # every front-centre child read as permanently moved.
+        "anchorAt": anchor_at if anchor_at in ANCHOR_AT_CHOICES else "",
     }
 
 
@@ -186,7 +199,11 @@ def migrate_child_recipe(data):
         tab=data.get("tab"),
         dims_cm=(_float(dims.get("w")), _float(dims.get("d")), _float(dims.get("h"))),
         bodies=bodies,
-        built_at=data.get("builtAt"))
+        built_at=data.get("builtAt"),
+        # new_child_recipe coerces anything unrecognised to "" (unknown), so a
+        # hand-edited or future-version value degrades to "cannot compare"
+        # rather than to a plausible-looking wrong rule.
+        anchor_at=data.get("anchorAt"))
 
 
 UP = (0.0, 0.0, 1.0)

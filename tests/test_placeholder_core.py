@@ -593,3 +593,38 @@ def test_mother_setup_keeps_a_known_anchor_at():
 
 def test_mother_setup_rejects_an_unknown_anchor_at():
     assert pc.migrate_mother_setup({"anchorAt": "sideways"})["anchorAt"] == pc.ANCHOR_CENTRE
+
+
+# --- childRecipe records which anchor rule placed the child ------------------
+
+def test_new_child_recipe_records_anchor_at():
+    r = pc.new_child_recipe(
+        slot_id="slot-abc", mother={"fileId": "u", "name": "m", "version": 1},
+        config="", sheet_url="", tab="", dims_cm=(60.0, 58.0, 72.0), bodies=[],
+        built_at="2026-08-11T00:00:00", anchor_at=pc.ANCHOR_FRONT_CENTRE)
+    assert r["anchorAt"] == pc.ANCHOR_FRONT_CENTRE
+
+
+def test_child_recipe_anchor_at_round_trips():
+    r = pc.new_child_recipe(
+        slot_id="s", mother={}, config="", sheet_url="", tab="",
+        dims_cm=(1.0, 2.0, 3.0), bodies=[], built_at="t",
+        anchor_at=pc.ANCHOR_BOTTOM_FRONT_CENTRE)
+    assert pc.loads_attr(pc.dumps_attr(r), pc.migrate_child_recipe) == r
+
+
+def test_migrate_child_recipe_leaves_anchor_at_UNKNOWN_when_absent():
+    # Deliberately NOT defaulted to 'centre': a child built before this field
+    # existed was placed by an unknown rule, and guessing 'centre' would make a
+    # front-centre child read as permanently "moved" in Update Children. An
+    # empty string means "cannot compare", which the dialog reports honestly.
+    assert pc.migrate_child_recipe({})["anchorAt"] == ""
+
+
+def test_migrate_child_recipe_rejects_an_unknown_anchor_at():
+    assert pc.migrate_child_recipe({"anchorAt": "sideways"})["anchorAt"] == ""
+
+
+def test_migrate_child_recipe_keeps_a_known_anchor_at():
+    r = pc.migrate_child_recipe({"anchorAt": pc.ANCHOR_BOTTOM_CENTRE})
+    assert r["anchorAt"] == pc.ANCHOR_BOTTOM_CENTRE
