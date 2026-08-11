@@ -25,6 +25,37 @@ Identical to Plan 1 — reproduced here because a task's implementer may only se
 - **Never claim a Fusion-side task works on the basis of `py_compile`/`pyflakes`.** Steps labelled *(manual, user-run)* are verified by the user inside Fusion.
 - **Commit each completed task.**
 
+## READ FIRST — what changed in Plan 1 after this plan was written
+
+Plan 1 shipped as 1.15.0 and moved underneath this plan. Six things here are stale,
+and the first would produce a visibly broken dialog:
+
+1. **The anchor no longer lands on the box centre.** A mother now records
+   `anchorAt` — one of `centre`, `front_centre`, `bottom_centre`,
+   `bottom_front_centre` — because Fusion snaps a joint origin to face centres and
+   the centre-only rule put every child half a depth out of place. So the expected
+   placement is `occurrence_matrix(anchor_target(centre, frame, dims, anchorAt),
+   frame)`, **not** `occurrence_matrix(centre, frame)`. Getting this wrong makes
+   every non-centre-anchored child read as permanently `moved`, pre-ticking the
+   whole kitchen on every run.
+2. **The child records which rule placed it.** `childRecipe['anchorAt']` holds the
+   value that was applied. Use that, not the mother's current setting — reading the
+   mother would mean opening every mother just to draw the dialog. `""` means
+   UNKNOWN (a child built before the field existed): report movement as
+   undetectable for those rather than guessing `centre` and crying `moved`.
+3. **`find_children(design)` returns `(found, moved)`**, not one dict. `moved` maps
+   slot id → a message for children that exist but sit outside the top level and so
+   cannot be safely rebuilt.
+4. **`attribute_list` and `find_slot_bodies` already exist** in
+   `placeholder_cmds.py` — Plan 1 Task 9 needed them. Do not redefine them.
+5. **A config is optional.** `recipe['config']` may be `""`, meaning size-only with
+   no sheet involved, and `sheetUrl`/`tab` are `""` too. Never read a sheet for
+   those children.
+6. **The version stub below says 1.15.0, which is taken.** This work is 1.16.0.
+
+Everything else in this plan still holds: the pure decision logic, the table
+dialog, the phasing, and the reuse of `rebuild_child` for the actual work.
+
 ## Known limitation this plan makes explicit
 
 A child's front direction was chosen by picking a face at fill time and is **not
@@ -56,6 +87,14 @@ that asks for a face again. Silent wrong sizing is the failure this avoids.
   - `is_axis_aligned(vertices, frame, tolerance=1e-4) -> bool`
   - `child_status(recipe, current_version, box_dims_cm, moved, rotated, mother_found, box_found) -> dict` with keys `staleness`, `resized`, `moved`, `rotated`, `problem`, `tick`
   - `status_label(status) -> str`
+
+**Additional test required, from the READ FIRST notes.** `moved` is passed in, so
+`child_status` itself is unaffected by `anchorAt` — but the caller can no longer
+detect movement when a child's rule is unknown. Add a case asserting that a child
+whose `anchorAt` is `""` reports movement as undetectable rather than as `moved`,
+and decide the label for it (suggest `"anchor rule unknown — re-fill to enable
+move detection"`). Without this, the ~dozen children built by 1.15.0 before the
+field existed would each need a manual re-fill for no visible reason.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -323,7 +362,7 @@ git commit -m "feat(core): staleness, resize/move/rotation detection and status 
 - Modify: `SheetVariants/placeholder_cmds.py`
 
 **Interfaces:**
-- Consumes: `placeholder_cmds.{find_children, attribute_list, _body_vertices, read_slot_id}` (Plan 1 Tasks 8 and 10); `placeholder_core.{frame_from_matrix, extents_in_frame, occurrence_matrix, matrices_differ, is_axis_aligned, child_status}` (Task 1).
+- Consumes: `placeholder_cmds.{find_children, find_slot_bodies, attribute_list, _body_vertices, read_slot_id}` (Plan 1 Tasks 8-10 — all already exist); `placeholder_core.{frame_from_matrix, extents_in_frame, occurrence_matrix, anchor_target, matrices_differ, is_axis_aligned, child_status}` (Task 1 plus Plan 1).
 - Produces: `placeholder_cmds.survey_children(design) -> list[dict]`, each `{"occurrence", "recipe", "body", "status", "dims_cm", "matrix", "name"}`, sorted by mother name then child name.
 
 - [ ] **Step 1: Add the survey**
@@ -362,7 +401,7 @@ def survey_children(design):
     a box that moved or resized; a rotated box is detected by is_axis_aligned and
     reported rather than silently mis-measured.
     """
-    children = find_children(design)
+    children, moved_out = find_children(design)   # (found, moved) — see READ FIRST
     slot_bodies = find_slot_bodies(design)
     versions = _current_versions([recipe for _occ, recipe in children.values()])
 
@@ -384,7 +423,18 @@ def survey_children(design):
                     width, depth, height, centre = placeholder_core.extents_in_frame(
                         vertices, frame)
                     dims = (width, depth, height)
-                    matrix = placeholder_core.occurrence_matrix(centre, frame)
+                    # The anchor does NOT necessarily land on the box centre — see
+                    # READ FIRST. Compare against the placement THIS child's own
+                    # recorded rule implies. An empty anchorAt means the rule is
+                    # unknown (built before the field existed), and guessing
+                    # 'centre' there would report every front-centre child as
+                    # moved, so leave matrix None and let child_status say the
+                    # comparison is unavailable.
+                    if recipe['anchorAt']:
+                        matrix = placeholder_core.occurrence_matrix(
+                            placeholder_core.anchor_target(
+                                centre, frame, dims, recipe['anchorAt']),
+                            frame)
             except Exception:
                 body = None
 
@@ -401,9 +451,34 @@ def survey_children(design):
                 recipe, current, dims, moved, rotated,
                 mother_found, body is not None),
         })
+
+    # Children that exist but sit outside the top level cannot be rebuilt in
+    # place. They belong in the dialog as a reported, unselectable row — the same
+    # reasoning as a missing mother — rather than being omitted, which would read
+    # as "nothing to do here".
+    for slot_id, message in moved_out.items():
+        found = children.get(slot_id)
+        if not found:
+            continue
+        occurrence, recipe = found
+        rows.append({
+            'occurrence': occurrence, 'recipe': recipe, 'body': None,
+            'dims_cm': None, 'matrix': None,
+            'name': occurrence.component.name,
+            'status': dict(placeholder_core.child_status(
+                recipe, None, None, False, False, True, False),
+                problem=message),
+        })
+
     rows.sort(key=lambda r: (r['recipe']['mother']['name'], r['name']))
     return rows
 ```
+
+**Note on `moved_out`:** `find_children` returns those entries in its SECOND dict,
+and Plan 1 already excludes them from `children`, so the loop above will find
+nothing in `children.get(slot_id)` as written. Check `find_children`'s actual
+behaviour in `placeholder_cmds.py` before implementing this and adapt: the goal is
+one row per child, with the sub-assembly case reported rather than dropped.
 
 - [ ] **Step 2: Verify it compiles and lints**
 
@@ -602,6 +677,21 @@ git commit -m "feat: Update Children dialog groups children by mother and flags 
 - Consumes: `placeholder_cmds.{_open_mother, _row_values, _snapshot_for, rebuild_child}` from Plan 1 Tasks 9 and 10; `survey_children` from Task 2.
 - Produces: `placeholder_cmds.update_children(rows) -> list[str]` — one report line per child. Replaces the dry run.
 
+**Signatures that changed in Plan 1 — check them against the real code, do not
+trust the snippets below:**
+- `_snapshot_for(setup, values, dims_cm, unrestored_names)` — the `design`
+  parameter was removed (it re-derives internally), and it now appends to an
+  `unrestored_names` set the caller owns, so that one message box about a mother
+  left modified can be shown after the progress dialog closes rather than per size.
+- `rebuild_child(...)` returns `(ok, line)`; branch on `ok`.
+- `_open_mother(file_id)` refuses a mother with unsaved changes UNLESS this session
+  already drove and cleanly restored it, so back-to-back runs work.
+- The mother is closed in an OUTER `finally` after Phase 2, not at the end of
+  Phase 1 — its live `Appearance`/`Material` objects are still needed while the
+  looks are copied. Do not move it.
+- Phase 2 composes each slot's placement matrix itself; `survey_children` supplies
+  `row['matrix']` for the *comparison*, and the rebuild re-places from it.
+
 - [ ] **Step 1: Add the executor**
 
 Append to `SheetVariants/placeholder_cmds.py`:
@@ -658,12 +748,18 @@ def update_children(rows):
                     if key in snapshots:
                         continue
                     try:
-                        rows_url = recipe['sheetUrl'] or ''
-                        sheet_rows = SheetVariants.get_rows(
-                            rows_url, recipe['tab'] or None)
-                        values = _row_values(sheet_rows, recipe['config'])
+                        # A config is OPTIONAL since 1.15.0 (see READ FIRST). An
+                        # empty config means size-only: no sheet exists to read,
+                        # and recipe['sheetUrl'] is '' too, so calling get_rows
+                        # would fail on a child that is perfectly valid.
+                        if recipe['config']:
+                            sheet_rows = SheetVariants.get_rows(
+                                recipe['sheetUrl'] or '', recipe['tab'] or None)
+                            values = _row_values(sheet_rows, recipe['config'])
+                        else:
+                            values = {}
                         snapshots[key] = _snapshot_for(
-                            mother_design, setup, values, row['dims_cm'])
+                            setup, values, row['dims_cm'], unrestored_names)
                     except Exception as err:
                         failures.append('{} — {}'.format(row['name'], err))
             finally:
@@ -761,14 +857,14 @@ git commit -m "feat: Update Children rebuilds picked children and records the ne
 
 - [ ] **Step 1: Bump the manifest version**
 
-In `SheetVariants/SheetVariants.manifest`, change `"version": "1.14.0"` to `"version": "1.15.0"`.
+In `SheetVariants/SheetVariants.manifest`, change `"version": "1.15.0"` to `"version": "1.16.0"`.
 
 - [ ] **Step 2: Add the CHANGELOG entry**
 
 In `CHANGELOG.md`, directly below the `## Planned / ideas` section and above `## 1.14.0`, insert:
 
 ```markdown
-## 1.15.0 — Update children
+## 1.16.0 — Update children
 
 - **Update Children** — one dialog listing every child in the layout, grouped by
   its mother and showing that mother's stored version against its current one.
