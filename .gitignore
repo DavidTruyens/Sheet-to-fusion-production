@@ -19,3 +19,9 @@ __pycache__/
 
 # Subagent-driven-development scratch (ledgers, briefs, review packages)
 .superpowers/
+
+# macOS
+.DS_Store
+
+# Harness-created worktrees
+.claude/worktrees/
