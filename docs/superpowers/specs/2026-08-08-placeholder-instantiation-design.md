@@ -481,7 +481,39 @@ Both are gated on the spike.
 
 ### Out of scope
 
-- **Height on an axis other than Z.** Fixed to world `+Z`, per current need.
+- **Height on an axis other than Z.** Fixed to world `+Z`. Considered and deferred
+  after Plan 1 shipped — recorded here so the reasoning is not re-derived.
+
+  What the constraint buys: **one selection determines the whole frame.** Pick the
+  front face, and depth is `-normal`, up is `+Z`, width is `depth × up`. Drop Z and
+  a front-face normal leaves the rotation *about* that normal undetermined, so a
+  second input becomes necessary.
+
+  It is not structurally entangled. The assumption lives in
+  `placeholder_core._frame_from_outward` (which forces `up` and rejects a
+  non-vertical face) and in `FRONT_AXES` excluding `±Z`. Everything downstream —
+  `extents_in_frame`, `occurrence_matrix`, `local_matrix`, `anchor_target` — already
+  takes a frame as an argument and is indifferent to how it was built.
+
+  Three ways to generalise, if a real case appears (a sloped ceiling, a non-level
+  floor, non-casework uses):
+
+  1. **Derive up from the box.** A true box has three axis directions; given the
+     front normal, take the remaining axis closest to world `+Z`. No new UI, and it
+     handles any tilt under 90°. Cost: it needs the placeholder to be a real box
+     with parallel faces, which today it need not be. `is_axis_aligned()` (Plan 2)
+     already answers exactly that question, so the check exists.
+  2. **Optional second pick.** Front face required, an "up" reference optional,
+     defaulting to `+Z`. Fully general, backwards compatible, one extra click only
+     when needed. The mother gains an `up` axis beside `front`, validated
+     perpendicular.
+  3. **Always two picks.** Simplest code, worst ergonomics for the common case.
+
+  Preference is (1) with a fallback to `+Z`. **Decide it together with Plan 2**, not
+  before: `is_axis_aligned()` currently treats a rotated box as an error meaning
+  "re-pick the front face", and under a general up axis some of those rotations
+  become legitimate. Generalising Plan 1 alone would leave the two halves
+  disagreeing.
 - **Export profiles applied to a mother.** A child takes the mother's whole model.
   The existing profile machinery can produce cut lists from the finished layout
   later.

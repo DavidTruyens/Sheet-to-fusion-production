@@ -16,7 +16,18 @@ confirmations you can batch at the end.
 | 2 | **PASS** — after the anchor fix. Originally failed: every child sat half a depth too far back |
 | 3 | **PASS** |
 | 4 | **PASS** — a reported appearance problem turned out to be a panel with no appearance in the mother itself, faithfully copied. Not a defect |
-| 5–15 | not yet run |
+| 5–15 | **PASS** — all reported fine |
+
+**One caveat on item 5.** Fillets on child geometry recomputed cleanly across the
+rebuilds that were run, so the README's "does not survive" claim was corrected to
+the condition that actually governs it: a feature anchored to generated geometry
+survives as long as the edge or face it references still exists. What remains
+**unmeasured** is the genuinely destructive path — a rebuild that removes the
+referenced edge, where spike 3 saw `finishEdit()` raise. Whether that leaves the
+base feature in edit mode and takes the *rest of the run* down with it is still
+unknown. The code handles it defensively (per-slot isolation, a failure line
+instead of a raise), so this is a residual risk rather than a known bug — but it is
+the one claim in the README that real use has not yet confirmed.
 
 Found by using it, not by review — all now fixed and released in 1.15.0:
 
