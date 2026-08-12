@@ -387,8 +387,10 @@ def staleness(stored_version, current_version):
     Any difference counts, not just an increase — reverting a mother to an older
     version is still a change the children have not seen. A version that is not an
     int (a mother that was never saved, or could not be resolved) is unknown rather
-    than stale, so a resolution failure never masquerades as an update."""
-    if not isinstance(stored_version, int) or not isinstance(current_version, int):
+    than stale, so a resolution failure never masquerades as an update. Both sides
+    go through ``_version``, which also excludes ``bool`` — the same reason it does
+    for a stored recipe applies just as much to a freshly-read current version."""
+    if _version(stored_version) is None or _version(current_version) is None:
         return STALE_UNKNOWN
     return STALE_OUT_OF_DATE if stored_version != current_version else STALE_CURRENT
 
