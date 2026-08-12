@@ -586,6 +586,114 @@ class FillExecuteHandler(adsk.core.CommandEventHandler):
             ui.messageBox('Fill Placeholders failed:\n' + traceback.format_exc())
 
 
+UPDATE_CMD_ID = 'sheetVariantsUpdateChildrenCmd'
+UPDATE_CMD_NAME = 'Update Children'
+UPDATE_CMD_DESC = ('Rebuild children whose mother model has moved on, or whose '
+                   'placeholder box has been moved or resized.')
+
+# The survey is resolved when the dialog opens and reused by the execute handler,
+# so opening the dialog does its data-panel lookups exactly once.
+_survey = []
+
+
+def _mother_heading(row):
+    recipe = row['recipe']
+    stored = recipe['mother']['version']
+    if row['status']['problem'] == 'mother not found':
+        return '{} — missing'.format(recipe['mother']['name'] or '(unnamed)')
+    if row['status']['staleness'] == placeholder_core.STALE_OUT_OF_DATE:
+        return '{} — v{} is out of date'.format(recipe['mother']['name'], stored)
+    return '{} — v{}'.format(recipe['mother']['name'], stored)
+
+
+class UpdateCreatedHandler(adsk.core.CommandCreatedEventHandler):
+    def notify(self, args):
+        try:
+            cmd = args.command
+            # Executing a pre-empted command rebuilds geometry by default in
+            # Fusion, and switching documents pre-empts. This command must
+            # never rebuild silently — see PrepareCreatedHandler/FillCreatedHandler.
+            cmd.isExecutedWhenPreEmpted = False
+            inputs = cmd.commandInputs
+            design = adsk.fusion.Design.cast(app.activeProduct)
+            if not design:
+                inputs.addTextBoxCommandInput('err', '', 'Open a layout design first.',
+                                              2, True)
+                return
+
+            global _survey
+            _survey = survey_children(design)
+            if not _survey:
+                inputs.addTextBoxCommandInput(
+                    'err', '',
+                    'This design has no children yet. Run Fill Placeholders first.',
+                    2, True)
+                return
+
+            table = inputs.addTableCommandInput('children', 'Children', 4, '1:3:3:4')
+            table.maximumVisibleRows = 14
+            table.minimumVisibleRows = 6
+            last_mother = None
+            for index, row in enumerate(_survey):
+                heading = _mother_heading(row)
+                if heading != last_mother:
+                    last_mother = heading
+                    label = inputs.addTextBoxCommandInput(
+                        'head{}'.format(index), '', '<b>{}</b>'.format(heading), 1, True)
+                    table.addCommandInput(label, table.rowCount, 0, 0, 3)
+
+                tick = inputs.addBoolValueInput(
+                    'tick{}'.format(index), '', True, '', row['status']['tick'])
+                tick.isEnabled = not row['status']['problem']
+                name = inputs.addTextBoxCommandInput(
+                    'name{}'.format(index), '', row['name'], 1, True)
+                config = inputs.addTextBoxCommandInput(
+                    'cfg{}'.format(index), '', row['recipe']['config'], 1, True)
+                state = inputs.addTextBoxCommandInput(
+                    'st{}'.format(index), '',
+                    placeholder_core.status_label(row['status']), 1, True)
+                table_row = table.rowCount
+                table.addCommandInput(tick, table_row, 0)
+                table.addCommandInput(name, table_row, 1)
+                table.addCommandInput(config, table_row, 2)
+                table.addCommandInput(state, table_row, 3)
+
+            handler = UpdateExecuteHandler()
+            cmd.execute.add(handler)
+            _handlers.append(handler)
+            cmd.setDialogInitialSize(560, 520)
+        except Exception:
+            if ui:
+                ui.messageBox('Update Children failed:\n' + traceback.format_exc())
+
+
+def _ticked_rows(inputs):
+    picked = []
+    for index, row in enumerate(_survey):
+        tick = inputs.itemById('tick{}'.format(index))
+        if tick and tick.value and not row['status']['problem']:
+            picked.append(row)
+    return picked
+
+
+class UpdateExecuteHandler(adsk.core.CommandEventHandler):
+    def notify(self, args):
+        try:
+            inputs = args.firingEvent.sender.commandInputs
+            if not inputs.itemById('children'):
+                return  # dialog stopped at an error text box; nothing built
+            picked = _ticked_rows(inputs)
+            if not picked:
+                ui.messageBox('Nothing ticked — nothing to update.')
+                return
+            ui.messageBox('DRY RUN — would rebuild:\n\n'
+                          + '\n'.join('{} ({})'.format(r['name'],
+                                                       placeholder_core.status_label(r['status']))
+                                      for r in picked))
+        except Exception:
+            ui.messageBox('Update Children failed:\n' + traceback.format_exc())
+
+
 _handlers = []
 
 # Panel this module last registered its controls into, so unregister() can find
@@ -600,6 +708,7 @@ _panel = None
 _COMMANDS = (
     (PREPARE_CMD_ID, PREPARE_CMD_NAME, PREPARE_CMD_DESC, PrepareCreatedHandler),
     (FILL_CMD_ID, FILL_CMD_NAME, FILL_CMD_DESC, FillCreatedHandler),
+    (UPDATE_CMD_ID, UPDATE_CMD_NAME, UPDATE_CMD_DESC, UpdateCreatedHandler),
 )
 
 
