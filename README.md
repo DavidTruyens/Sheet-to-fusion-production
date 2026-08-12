@@ -258,6 +258,52 @@ the way step 2 suggests doing for boxes) can't be found for a rebuild either —
 Placeholders reports that slot as unrebuildable rather than silently building a
 duplicate on top of it. Keep a filled child at the top level of the design.
 
+**5. Keep up with the mother.** When you improve a mother model and save it, run
+**Update Children** in the layout. It lists every child, grouped by its mother, with
+each mother's heading showing the version its children were built from — and calling
+it out once that differs from the mother's current version. That comparison is
+exact: **any** difference counts, including a mother that has been reverted to an
+older version, not just one that has moved on. A box that has been moved or resized
+since it was filled is flagged the same way. Out-of-date, resized and moved children
+are pre-ticked; tick what you want rebuilt and click OK.
+
+```text
+Update children
+
+  Base Cabinet — v12 is out of date
+    [x] B60_2drawer      Base_2drawer   out of date
+    [x] B90_sink         Base_sink      out of date, resized
+    [x] B60_corner       Base_2drawer   out of date, moved
+
+  Tall Unit — v3
+    [ ] TALL_60           Tall_oven      up to date
+
+  Wall Unit — missing
+    [ ] W80                Wall_2door     mother not found
+```
+
+Four kinds of child can't be helped by rebuilding, so they are shown but left
+unticked: a mother that can't be found, a placeholder box that was deleted, a box
+that has been **rotated**, and a child that has been moved into a sub-assembly. A
+rotated box needs its front face picked again, so it goes back to **Fill
+Placeholders**; a child in a sub-assembly has to be moved back to the top level of
+the design before either command can find it.
+
+A rebuild swaps geometry through the same in-place `updateBody()` path a re-fill
+uses (see step 4 above), so a feature you added downstream of the generated
+geometry survives for as long as what it references still exists after the change —
+the same durability rule as re-running Fill Placeholders, not a stronger guarantee.
+Each mother is opened once for the whole run, and children that share a mother,
+config and size share one recompute rather than driving the model separately. A
+problem opening or reading a mother fails every child under it; a problem with one
+child's own drive step fails only that child — either way, every other mother's
+children still get their turn.
+
+If a run can't restore every parameter it drove on a mother you already had open, it
+warns you, names them, and tells you to close that mother **without saving** — it is
+left modified with a driven value still applied. Cancelling keeps whatever children
+were already rebuilt and reports the rest as cancelled.
+
 ## How the Google connection works
 
 Fusion's bundled Python can't easily install the Google client libraries, so the
