@@ -1183,12 +1183,21 @@ def build_children(slots, mother, config):
         # not while a modal progress dialog is still up, which would just
         # reintroduce the orphaned-dialog problem at a new site.
         if unrestored_names:
-            ui.messageBox(
-                'Fill Placeholders could not restore {} to its original value '
-                'in "{}" after this run.\n\nThis mother is left MODIFIED with '
-                'a driven value still applied. Close it WITHOUT SAVING — '
-                'saving now would make that value permanent.'
-                .format(', '.join(sorted(unrestored_names)), mother['name']))
+            # A mother THIS RUN opened is discarded via close(False) in the
+            # outer finally moments after this would show, regardless of what
+            # could not be restored — its on-disk file was never touched, so
+            # "close it without saving" would be both unactionable (it is
+            # already closed by the time anyone could act on it) and
+            # needlessly alarming. Only a mother the user already had open
+            # stays open and modified after this function returns, which is
+            # the one case where the warning is both true and useful.
+            if not opened_by_us:
+                ui.messageBox(
+                    'Fill Placeholders could not restore {} to its original value '
+                    'in "{}" after this run.\n\nThis mother is left MODIFIED with '
+                    'a driven value still applied. Close it WITHOUT SAVING — '
+                    'saving now would make that value permanent.'
+                    .format(', '.join(sorted(unrestored_names)), mother['name']))
         else:
             # Every value driven in this run came back exactly as captured —
             # any "modified" flag Fusion now shows on this mother is dirt this
@@ -1396,22 +1405,38 @@ def build_children(slots, mother, config):
     return report + failures
 
 
+def _exc_text(err):
+    """A report-line-safe rendering of an exception: never blank, so a caller
+    formatting '{} — {}'.format(name, _exc_text(err)) can't produce a dangling
+    em dash when str(err) is empty. That is more likely to happen here than
+    elsewhere in this module now that several of update_children's catches
+    are deliberately broad `except Exception` — not just the narrow,
+    message-carrying RuntimeErrors this add-in usually raises."""
+    text = str(err)
+    return '{}: {}'.format(type(err).__name__, text) if text else type(err).__name__
+
+
 def update_children(rows):
     """Rebuild the given children, phased exactly as build_children is: everything
     needing a mother happens with that mother active, then the layout is
     reactivated once and every child is swapped in place.
 
     Children are grouped by mother so each mother is opened once, and within a
-    mother by (config, size) so identical units share one recompute — the same
-    two-level grouping build_children uses, just with several mothers instead
-    of one. One failing mother's children fail only that mother's children —
-    every other mother's children still get their turn — and one failing
-    child fails only that child, never the run.
+    mother by (config, sheet, size) so identical units share one recompute —
+    the same two-level grouping build_children uses, just with several
+    mothers instead of one. One failing mother's children fail only that
+    mother's children — every other mother's children still get their turn —
+    and one failing child fails only that child, never the run.
 
     Each row already carries its own recipe (what to drive the mother to) and
     its own current matrix/dims_cm (survey_children's fresh read of the box) —
     unlike build_children there is no Phase 0 to resolve, since the survey
-    already did it.
+    already did it. What survey_children could NOT hand over is a live
+    Occurrence: Phase 1 activates one or more mother documents before Phase 2
+    ever runs, and activating a document invalidates every live reference to
+    another one — including row['occurrence'], captured back when the dialog
+    was created. Phase 2 re-resolves every occurrence fresh via find_children
+    instead, exactly as build_children's own Phase 2 does.
     """
     layout_doc = app.activeDocument
     import SheetVariants
@@ -1428,9 +1453,26 @@ def update_children(rows):
     # several open at once here.
     mother_docs = {}
     unrestored_by_mother = {}
-    attempted = set()   # id(row) for every row Phase 1 actually got to
+    # id(row), not the row itself: rows are plain dicts (unhashable), and this
+    # function never copies or replaces any row in `rows` — every row stays
+    # the same object for the whole call, in both by_mother's groups and the
+    # flat `rows` list Phase 2 iterates, so identity-by-id is a safe, stable
+    # key across both phases.
+    attempted = set()
     cancelled = False
     report = []
+    # (url, tab) -> sheet_rows, so several children sharing a mother's linked
+    # sheet cost one HTTP read for the whole run rather than one per distinct
+    # key, and all of them see the same revision even if the sheet is edited
+    # mid-run.
+    sheet_cache = {}
+    # key -> failure text. A key that has already failed once is not retried
+    # for a later child that happens to share it — the failure (a stale
+    # config, a column that no longer maps to a parameter) is exactly as
+    # doomed the second time, and retrying would silently re-run an expensive
+    # drive-and-recompute for every sibling. Recording the message here is
+    # what still gives every affected child its own report line.
+    failed_keys = {}
 
     # The progress dialog covers Phase 1 only: driving and recomputing each
     # mother is the slow part, while Phase 2 just copies snapshots that are
@@ -1454,7 +1496,7 @@ def update_children(rows):
                     # other mother's children in the same run.
                     for row in group:
                         attempted.add(id(row))
-                        failures.append('{} — {}'.format(row['name'], err))
+                        failures.append('{} — {}'.format(row['name'], _exc_text(err)))
                         done += 1
                         progress.progressValue = done
                     continue
@@ -1476,46 +1518,93 @@ def update_children(rows):
                     versions[file_id] = (doc.dataFile.versionNumber
                                         if doc.dataFile else None)
                     mother_unrestored = set()
+                    drove_ok = False   # at least one clean _snapshot_for (M7)
                     for row in group:
                         if progress.wasCancelled:
                             cancelled = True
                             break
                         attempted.add(id(row))
                         recipe = row['recipe']
-                        key = (file_id, recipe['config'],
-                              tuple(round(v, 6) for v in row['dims_cm']))
-                        if key not in snapshots:
-                            try:
+                        key = None
+                        try:
+                            # Everything the dedup key depends on lives INSIDE
+                            # this try, not just the drive that follows it: a
+                            # malformed dims_cm must fail this one child, not
+                            # blow up the whole loop with a bare traceback.
+                            # sheetUrl/tab are part of the key (not just
+                            # config+size) because they are per-child recorded
+                            # data too — two children of the same mother at
+                            # the same config name and size but pointing at
+                            # different spreadsheets must not collide and
+                            # silently share one child's values.
+                            key = (file_id, recipe['config'], recipe['sheetUrl'],
+                                  recipe['tab'],
+                                  tuple(round(v, 6) for v in row['dims_cm']))
+                            if key in failed_keys:
+                                failures.append('{} — {}'.format(
+                                    row['name'], failed_keys[key]))
+                            elif key not in snapshots:
                                 # A config is OPTIONAL (since 1.15.0): an empty
                                 # config means size-only — no sheet exists to
                                 # read, and recipe['sheetUrl']/['tab'] are ''
                                 # too, so calling get_rows would fail on a
                                 # perfectly valid child.
                                 if recipe['config']:
-                                    sheet_rows = SheetVariants.get_rows(
-                                        recipe['sheetUrl'] or '',
-                                        recipe['tab'] or None)
-                                    values = _row_values(sheet_rows, recipe['config'])
+                                    cache_key = (recipe['sheetUrl'] or '',
+                                                recipe['tab'] or None)
+                                    if cache_key not in sheet_cache:
+                                        sheet_cache[cache_key] = SheetVariants.get_rows(
+                                            cache_key[0], cache_key[1])
+                                    values = _row_values(sheet_cache[cache_key],
+                                                         recipe['config'])
                                 else:
                                     values = {}
+                                # A renamed or deleted mother parameter must
+                                # fail loudly here, per child, exactly as
+                                # build_children fails loudly up front for its
+                                # one config — not silently drive the
+                                # mother's CURRENT value instead of the
+                                # config's and report a rebuilt child as a
+                                # success that the next survey then reads as
+                                # "up to date". Checked per child (not once
+                                # per run, as build_children does) because
+                                # different children of the same mother can
+                                # carry different configs.
+                                missing_columns = sorted(
+                                    name for name in values
+                                    if not mother_design.allParameters.itemByName(name))
+                                if missing_columns:
+                                    raise RuntimeError(
+                                        'these columns do not match any parameter '
+                                        'in "{}": {}'.format(
+                                            mother_name, ', '.join(missing_columns)))
                                 snapshots[key] = _snapshot_for(
                                     setup, values, row['dims_cm'], mother_unrestored)
-                            except Exception as err:
-                                # One unusable child must not cost the whole run.
-                                failures.append('{} — {}'.format(row['name'], err))
+                                drove_ok = True
+                        except Exception as err:
+                            # One unusable child must not cost the whole run.
+                            text = _exc_text(err)
+                            if key is not None:
+                                failed_keys[key] = text
+                            failures.append('{} — {}'.format(row['name'], text))
                         done += 1
                         progress.progressValue = done
                     if mother_unrestored:
                         unrestored_by_mother[file_id] = (mother_name, mother_unrestored)
-                    else:
-                        # Every value driven for THIS mother in this run came
-                        # back exactly as captured — any "modified" flag
-                        # Fusion now shows on it is dirt this add-in's own
-                        # drive-and-restore left behind, not unsaved user
+                    elif drove_ok:
+                        # At least one value driven for THIS mother in this
+                        # run came back exactly as captured — any "modified"
+                        # flag Fusion now shows on it is dirt this add-in's
+                        # own drive-and-restore left behind, not unsaved user
                         # work. Let _open_mother's isModified check trust that
                         # for the rest of this session, so a second Update (or
                         # a Fill) can reuse this mother without a false
-                        # "unsaved changes" refusal.
+                        # "unsaved changes" refusal. Gated on drove_ok, not
+                        # just on mother_unrestored being empty: if nothing
+                        # was actually driven — every child cancelled or
+                        # failed before reaching _snapshot_for — there is no
+                        # evidence this session left the mother clean, only
+                        # that it was never touched.
                         _cleanly_restored_file_ids.add(file_id)
                 except Exception as err:
                     # Something unexpected went wrong driving this mother, not
@@ -1525,7 +1614,7 @@ def update_children(rows):
                     for row in group:
                         if id(row) not in attempted:
                             attempted.add(id(row))
-                            failures.append('{} — {}'.format(row['name'], err))
+                            failures.append('{} — {}'.format(row['name'], _exc_text(err)))
                             done += 1
                             progress.progressValue = done
         finally:
@@ -1539,14 +1628,26 @@ def update_children(rows):
         # and not while a modal progress dialog is still up, which would just
         # reintroduce the orphaned-dialog problem at a new site (see
         # build_children's identical comment).
-        if unrestored_by_mother:
+        #
+        # Only a mother this run did NOT open belongs in this warning: one we
+        # opened ourselves is discarded via close(False) in the outer finally
+        # regardless of what could not be restored — its on-disk file was
+        # never touched — so telling the user to close it without saving
+        # would be both unactionable (already closed by the time anyone could
+        # act) and needlessly alarming. A mother the user already had open
+        # stays open and modified after we return, which is the one case
+        # this warning is for.
+        already_open = {fid: pair for fid, pair in unrestored_by_mother.items()
+                        if not mother_docs.get(fid, (None, False))[1]}
+        if already_open:
             lines = ['Update Children could not restore every parameter it '
-                    'drove back to its original value:', '']
-            for name, names in sorted(unrestored_by_mother.values(), key=lambda pair: pair[0]):
+                    'drove back to its original value in one or more mothers '
+                    'you already had open:', '']
+            for name, names in sorted(already_open.values(), key=lambda pair: pair[0]):
                 lines.append('"{}": {}'.format(name, ', '.join(sorted(names))))
             lines.append('')
-            lines.append('These mothers are left MODIFIED with a driven value '
-                         'still applied. Close them WITHOUT SAVING — saving now '
+            lines.append('These are left MODIFIED with a driven value still '
+                         'applied. Close them WITHOUT SAVING — saving now '
                          'would make that value permanent.')
             ui.messageBox('\n'.join(lines))
 
@@ -1562,6 +1663,19 @@ def update_children(rows):
         tbm = adsk.fusion.TemporaryBRepManager.get()
         built_at = datetime.datetime.now().isoformat(timespec='seconds')
 
+        # Re-resolve every child's occurrence AFTER the document switch. Phase
+        # 1 activated one or more mother documents above, which invalidates
+        # every live reference to the layout — including row['occurrence'],
+        # captured by survey_children back when the dialog was created. One
+        # attribute scan for the whole run, exactly matching build_children's
+        # own Phase 2 re-lookup (find_slot_bodies/find_children).
+        try:
+            children, _moved = find_children(design)
+        except Exception as err:
+            children = {}
+            failures.append('Could not re-find children after returning to '
+                            'the layout: {}'.format(_exc_text(err)))
+
         for row in rows:
             if id(row) not in attempted:
                 # Cancellation stopped Phase 1 before this row was ever looked
@@ -1570,21 +1684,34 @@ def update_children(rows):
                 failures.append('{} — cancelled before it was built.'
                                 .format(row['name']))
                 continue
-            recipe = row['recipe']
-            file_id = recipe['mother']['fileId']
-            key = (file_id, recipe['config'],
-                  tuple(round(v, 6) for v in row['dims_cm']))
-            template = snapshots.get(key)
-            if template is None:
-                continue  # already recorded in failures
-            if not template:
-                failures.append('{} — the mother produced no solid bodies at '
-                                'that size.'.format(row['name']))
-                continue
 
             # Phase 2 is isolated per child, matching build_children's own
             # Phase 2: a throw partway through must fail only this one child.
+            # The dedup key is computed INSIDE this try too, not before it —
+            # a malformed dims_cm must fail this one child, not abort every
+            # remaining one with a bare traceback.
             try:
+                recipe = row['recipe']
+                file_id = recipe['mother']['fileId']
+                key = (file_id, recipe['config'], recipe['sheetUrl'],
+                      recipe['tab'], tuple(round(v, 6) for v in row['dims_cm']))
+                template = snapshots.get(key)
+                if template is None:
+                    continue  # already recorded in failures
+                if not template:
+                    failures.append('{} — the mother produced no solid bodies '
+                                    'at that size.'.format(row['name']))
+                    continue
+
+                fresh = children.get(recipe['slotId'])
+                if not fresh:
+                    failures.append(
+                        '{} — its occurrence could not be re-found in the '
+                        'layout after switching back from the mother; '
+                        'skipped.'.format(row['name']))
+                    continue
+                occurrence, _current_recipe = fresh
+
                 snaps = [{'temp': tbm.copy(s['temp']), 'appearance': s['appearance'],
                          'material': s['material'], 'name': s['name']}
                         for s in template]
@@ -1593,7 +1720,7 @@ def update_children(rows):
                 # recompute) via its (ok, line) return rather than raising, so
                 # branch on ok — not on line's wording, which is prose for the
                 # user, not a control signal.
-                ok, line = rebuild_child(design, row['occurrence'], recipe, snaps,
+                ok, line = rebuild_child(design, occurrence, recipe, snaps,
                                          row['matrix'])
                 if not ok:
                     # The geometry may be in a bad state: never stamp a fresh
@@ -1617,12 +1744,12 @@ def update_children(rows):
                     config=recipe['config'], sheet_url=recipe['sheetUrl'],
                     tab=recipe['tab'], dims_cm=row['dims_cm'],
                     bodies=body_names, built_at=built_at)
-                row['occurrence'].component.attributes.add(
+                occurrence.component.attributes.add(
                     placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
                     placeholder_core.dumps_attr(updated))
                 report.append(line)
             except Exception as err:
-                failures.append('{} — {}'.format(row['name'], err))
+                failures.append('{} — {}'.format(row['name'], _exc_text(err)))
     finally:
         # Always return to the layout — on success, on a whole-run failure,
         # and on cancellation alike — matching build_children's own
