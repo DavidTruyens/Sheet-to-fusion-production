@@ -9,6 +9,18 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
 - **Filter by thickness** — filter which variants or components are built/exported
   by their material thickness.
 
+## 1.16.0 — One anchor rule
+
+- **The anchor always lands on the centre of the box's front face.** 1.15.0 asked
+  the author to choose between four reference points; that choice turned out to add
+  no capability. Placing a child is a rigid transform, the frame fixes its
+  rotation, and the author already controls the remaining three degrees of freedom
+  by where the joint origin goes — so one fixed rule expresses everything a menu
+  could, with one fewer setting whose failure mode is silent.
+- **Breaking:** a mother whose anchor rule was anything other than *front face
+  centre* now places its children differently. Put the joint origin on the model's
+  front face and re-run Prepare Mother Model.
+
 ## 1.15.0 — Placeholder fixes from first real use
 
 Everything below was found by using 1.14.0 in Fusion, not by review.
@@ -41,13 +53,6 @@ Everything below was found by using 1.14.0 in Fusion, not by review.
   layout, pick a prepared mother, and each box gets a child component driven to
   that box's own size and orientation. The anchor lands at the box centre; the
   box is hidden, never deleted.
-- **The anchor's meaning is yours to choose.** Prepare Mother Model asks what the
-  anchor joint origin lands on: the box's centre, its front-face centre, its
-  bottom-face centre, or the middle of its bottom front edge. Fusion snaps a joint
-  origin to a face centre readily but offers no easy way to snap to a model's
-  centre, so assuming "anchor = box centre" placed a front-face anchor half a
-  depth too far back. If children come out offset by exactly half of something,
-  this is the setting to check.
 - **A sheet config is optional.** By default each box drives only the mother's
   width, depth and height and no sheet is read at all, so a mother that was
   never linked to one still works. Pick a config row when you want the sheet to

@@ -119,10 +119,10 @@ class PrepareCreatedHandler(adsk.core.CommandCreatedEventHandler):
             if not origins:
                 inputs.addTextBoxCommandInput(
                     'err', '',
-                    'This model has no joint origins. Create one at the point '
-                    'that should line up with the placeholder box (a face centre '
-                    'is fine — you say which reference point it lands on below). '
-                    'Use Assemble > Joint Origin, then run this again.',
+                    'This model has no joint origins. Put one on the centre of '
+                    "this model's FRONT face — that is the point placed at the "
+                    "centre of a placeholder box's front face. Use Assemble > "
+                    'Joint Origin, then run this again.',
                     4, True)
                 return
 
@@ -134,16 +134,6 @@ class PrepareCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 missing.append('anchor')
             _add_dropdown(inputs, 'front', 'Front faces along',
                           list(placeholder_core.FRONT_AXES), setup['front'])
-            # Which reference point of the BOX the anchor lands on. Fusion snaps
-            # a joint origin to face centres readily but gives you no easy way to
-            # snap to a model's centre, so forcing "anchor == box centre" made an
-            # anchor on the front face place every child half a depth too far
-            # back. Let the author say what their anchor means instead.
-            _add_dropdown(
-                inputs, 'anchorAt', 'Anchor lands on',
-                [placeholder_core.ANCHOR_AT_LABELS[k]
-                 for k in placeholder_core.ANCHOR_AT_CHOICES],
-                placeholder_core.ANCHOR_AT_LABELS[setup['anchorAt']])
             dimension_drops = []
             for input_id, label, key in (('pWidth', 'Width parameter', 'width'),
                                          ('pDepth', 'Depth parameter', 'depth'),
@@ -187,9 +177,9 @@ class PrepareCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     3, True)
             inputs.addTextBoxCommandInput(
                 'hint', '',
-                'The anchor is the point that lands at the centre of the '
-                'placeholder box. To shift the model within its box, move the '
-                'joint origin.',
+                "The anchor lands on the centre of the placeholder box's FRONT "
+                'face — so put the joint origin on your model\'s front face. To '
+                'shift the model within its box, move the joint origin.',
                 4, True)   # 3 rows clipped this mid-sentence in practice
 
             handler = PrepareExecuteHandler()
@@ -212,15 +202,9 @@ class PrepareExecuteHandler(adsk.core.CommandEventHandler):
                 item = inputs.itemById(input_id).selectedItem
                 return item.name if item else ''
 
-            # The dropdown shows human labels; the attribute stores the key.
-            # An unrecognised label falls through to migrate_mother_setup's own
-            # default rather than being written out as-is.
-            by_label = {label: key for key, label
-                        in placeholder_core.ANCHOR_AT_LABELS.items()}
             setup = placeholder_core.migrate_mother_setup({
                 'anchor': picked('anchor'),
                 'front': picked('front'),
-                'anchorAt': by_label.get(picked('anchorAt')),
                 'params': {'width': picked('pWidth'),
                            'depth': picked('pDepth'),
                            'height': picked('pHeight')},
@@ -232,11 +216,11 @@ class PrepareExecuteHandler(adsk.core.CommandEventHandler):
                 return
             write_mother_setup(design, setup)
             ui.messageBox(
-                'Prepared "{}".\n\nanchor: {} lands on the {}\nfront: {}\n'
+                'Prepared "{}".\n\nanchor: {} (lands on the centre of the '
+                "placeholder box's front face)\nfront: {}\n"
                 'width: {}\ndepth: {}\nheight: {}\n\n'
                 'Save the document to keep this.'
                 .format(design.parentDocument.name, setup['anchor'],
-                        placeholder_core.ANCHOR_AT_LABELS[setup['anchorAt']],
                         setup['front'],
                         setup['params']['width'], setup['params']['depth'],
                         setup['params']['height']))
@@ -342,10 +326,9 @@ def resolve_slots(faces):
             'body': body,
             'slotId': read_slot_id(body),
             'dims_cm': (width, depth, height),
-            # The placement matrix is NOT built here. Which reference point of
-            # the box the mother's anchor lands on is a property of the MOTHER
-            # (its anchorAt), and no mother has been chosen yet at this point.
-            # Phase 2 composes the matrix once the mother's setup is known.
+            # The placement matrix is NOT built here. Composing it needs the
+            # mother's anchor, and no mother has been chosen at this point —
+            # Phase 2 builds it once the mother's setup is known.
             'centre': centre,
             'frame': frame,
             'name': name,
@@ -1177,15 +1160,14 @@ def build_children(slots, mother, config):
             occurrence = None
             created = False
             try:
-                # Compose the placement HERE, not in resolve_slots: it depends on
-                # the mother's anchorAt, which was unknown until the mother was
-                # opened. anchor_target picks which reference point of the box the
-                # mother's anchor lands on; occurrence_matrix then puts the
-                # child's local origin (the anchor, after local_matrix) there.
+                # Compose the placement HERE, not in resolve_slots: it needs the
+                # mother, which was not chosen when the faces were resolved.
+                # anchor_target gives the centre of the box's front face;
+                # occurrence_matrix then puts the child's local origin (the
+                # anchor, after local_matrix) there.
                 slot_matrix = placeholder_core.occurrence_matrix(
                     placeholder_core.anchor_target(
-                        slot['centre'], slot['frame'], slot['dims_cm'],
-                        setup['anchorAt']),
+                        slot['centre'], slot['frame'], slot['dims_cm']),
                     slot['frame'])
                 # Copy again per slot: identical units share one recompute, not
                 # one body.
@@ -1249,11 +1231,7 @@ def build_children(slots, mother, config):
                     config=config, sheet_url=rows_url, tab=(rows_tab or ''),
                     dims_cm=slot['dims_cm'],
                     bodies=body_names,
-                    built_at=built_at,
-                    # Record the rule that actually placed this child, so Update
-                    # Children can recompute the placement it SHOULD have and
-                    # spot a moved box without opening the mother.
-                    anchor_at=setup['anchorAt'])
+                    built_at=built_at)
                 occurrence.component.attributes.add(
                     placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
                     placeholder_core.dumps_attr(recipe))

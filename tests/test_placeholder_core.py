@@ -537,7 +537,7 @@ def test_pair_bodies_fed_resulting_names_is_a_stable_no_op():
         assert kinds == ["update"] * len(new), (old, new, resulting, ops2)
 
 
-# --- anchor_target: what point of the box the mother's anchor lands on --------
+# --- anchor_target: always the centre of the box's front face ---------------
 
 def _frame_and_box():
     """A -Y-facing frame and a 60 x 58 x 72 box centred at (10, 20, 36)."""
@@ -545,86 +545,37 @@ def _frame_and_box():
     return frame, (10.0, 20.0, 36.0), (60.0, 58.0, 72.0)
 
 
-def test_anchor_target_centre_is_the_box_centre():
+def test_anchor_target_is_the_front_face_centre():
     frame, centre, dims = _frame_and_box()
-    assert _close(pc.anchor_target(centre, frame, dims, pc.ANCHOR_CENTRE), centre)
+    # depth runs +Y, so the box's FRONT is at the -Y end: 20 - 58/2.
+    assert _close(pc.anchor_target(centre, frame, dims), (10.0, 20.0 - 29.0, 36.0))
 
 
-def test_anchor_target_front_centre_moves_against_the_depth_axis():
+def test_anchor_target_does_not_move_across_width_or_height():
     frame, centre, dims = _frame_and_box()
-    got = pc.anchor_target(centre, frame, dims, pc.ANCHOR_FRONT_CENTRE)
-    # depth axis is +Y, so the FRONT of the box is at the -Y end: 20 - 58/2.
-    assert _close(got, (10.0, 20.0 - 29.0, 36.0))
-
-
-def test_anchor_target_bottom_centre_moves_down_by_half_the_height():
-    frame, centre, dims = _frame_and_box()
-    got = pc.anchor_target(centre, frame, dims, pc.ANCHOR_BOTTOM_CENTRE)
-    assert _close(got, (10.0, 20.0, 36.0 - 36.0))
-
-
-def test_anchor_target_bottom_front_centre_moves_on_both_axes():
-    frame, centre, dims = _frame_and_box()
-    got = pc.anchor_target(centre, frame, dims, pc.ANCHOR_BOTTOM_FRONT_CENTRE)
-    assert _close(got, (10.0, 20.0 - 29.0, 36.0 - 36.0))
+    got = pc.anchor_target(centre, frame, dims)
+    assert _close((got[0], got[2]), (centre[0], centre[2]))
 
 
 def test_anchor_target_follows_a_rotated_frame():
     # Front face pointing +X, so depth runs -X and the box's front is at +X.
     frame = pc.target_frame((1.0, 0.0, 0.0))
-    got = pc.anchor_target((0.0, 0.0, 0.0), frame, (60.0, 58.0, 72.0),
-                           pc.ANCHOR_FRONT_CENTRE)
+    got = pc.anchor_target((0.0, 0.0, 0.0), frame, (60.0, 58.0, 72.0))
     assert _close(got, (29.0, 0.0, 0.0))
 
 
-def test_anchor_target_unknown_choice_falls_back_to_centre():
-    frame, centre, dims = _frame_and_box()
-    assert _close(pc.anchor_target(centre, frame, dims, "nonsense"), centre)
+def test_anchor_target_of_a_zero_depth_box_is_the_centre():
+    frame, centre, _dims = _frame_and_box()
+    assert _close(pc.anchor_target(centre, frame, (60.0, 0.0, 72.0)), centre)
 
 
-def test_mother_setup_defaults_anchor_at_to_centre():
-    assert pc.migrate_mother_setup({})["anchorAt"] == pc.ANCHOR_CENTRE
+def test_mother_setup_no_longer_carries_an_anchor_rule():
+    # One fixed rule: the author positions by moving the joint origin, so there
+    # is nothing per-mother to store and nothing to get wrong.
+    assert "anchorAt" not in pc.migrate_mother_setup({})
+    assert "anchorAt" not in pc.migrate_mother_setup({"anchorAt": "centre"})
 
 
-def test_mother_setup_keeps_a_known_anchor_at():
-    s = pc.migrate_mother_setup({"anchorAt": pc.ANCHOR_BOTTOM_FRONT_CENTRE})
-    assert s["anchorAt"] == pc.ANCHOR_BOTTOM_FRONT_CENTRE
-
-
-def test_mother_setup_rejects_an_unknown_anchor_at():
-    assert pc.migrate_mother_setup({"anchorAt": "sideways"})["anchorAt"] == pc.ANCHOR_CENTRE
-
-
-# --- childRecipe records which anchor rule placed the child ------------------
-
-def test_new_child_recipe_records_anchor_at():
-    r = pc.new_child_recipe(
-        slot_id="slot-abc", mother={"fileId": "u", "name": "m", "version": 1},
-        config="", sheet_url="", tab="", dims_cm=(60.0, 58.0, 72.0), bodies=[],
-        built_at="2026-08-11T00:00:00", anchor_at=pc.ANCHOR_FRONT_CENTRE)
-    assert r["anchorAt"] == pc.ANCHOR_FRONT_CENTRE
-
-
-def test_child_recipe_anchor_at_round_trips():
-    r = pc.new_child_recipe(
-        slot_id="s", mother={}, config="", sheet_url="", tab="",
-        dims_cm=(1.0, 2.0, 3.0), bodies=[], built_at="t",
-        anchor_at=pc.ANCHOR_BOTTOM_FRONT_CENTRE)
-    assert pc.loads_attr(pc.dumps_attr(r), pc.migrate_child_recipe) == r
-
-
-def test_migrate_child_recipe_leaves_anchor_at_UNKNOWN_when_absent():
-    # Deliberately NOT defaulted to 'centre': a child built before this field
-    # existed was placed by an unknown rule, and guessing 'centre' would make a
-    # front-centre child read as permanently "moved" in Update Children. An
-    # empty string means "cannot compare", which the dialog reports honestly.
-    assert pc.migrate_child_recipe({})["anchorAt"] == ""
-
-
-def test_migrate_child_recipe_rejects_an_unknown_anchor_at():
-    assert pc.migrate_child_recipe({"anchorAt": "sideways"})["anchorAt"] == ""
-
-
-def test_migrate_child_recipe_keeps_a_known_anchor_at():
-    r = pc.migrate_child_recipe({"anchorAt": pc.ANCHOR_BOTTOM_CENTRE})
-    assert r["anchorAt"] == pc.ANCHOR_BOTTOM_CENTRE
+def test_child_recipe_no_longer_carries_an_anchor_rule():
+    assert "anchorAt" not in pc.migrate_child_recipe({})
+    assert "anchorAt" not in pc.migrate_child_recipe({"anchorAt": "centre"})

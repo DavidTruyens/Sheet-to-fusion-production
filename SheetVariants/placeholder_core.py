@@ -36,54 +36,38 @@ def loads_attr(text, migrate):
     return migrate(data)
 
 
-# Which reference point of the placeholder box the mother's anchor lands on.
-#
-# The first version of this feature had no choice here: the anchor always landed
-# on the box's CENTRE. That only works if the mother's author put the joint
-# origin at the model's centre — and Fusion gives you no easy way to snap to
-# that, while it snaps to face centres readily. An anchor created on the front
-# face therefore placed every child half a depth too far back, which is exactly
-# how it failed in practice. So the author now says what their anchor means.
-ANCHOR_CENTRE = "centre"
-ANCHOR_FRONT_CENTRE = "front_centre"
-ANCHOR_BOTTOM_CENTRE = "bottom_centre"
-ANCHOR_BOTTOM_FRONT_CENTRE = "bottom_front_centre"
+def anchor_target(centre, frame, dims_cm):
+    """The world point the mother's anchor lands on: the centre of the box's
+    FRONT face.
 
-ANCHOR_AT_CHOICES = (ANCHOR_CENTRE, ANCHOR_FRONT_CENTRE,
-                     ANCHOR_BOTTOM_CENTRE, ANCHOR_BOTTOM_FRONT_CENTRE)
+    There is deliberately no choice here. Placing a child is a rigid transform;
+    the frame fixes its rotation, leaving three translation degrees of freedom —
+    and the author already controls all three by where they put the joint origin.
+    So one fixed rule plus a freely-placed anchor expresses every placement a
+    menu of reference points could, with nothing extra to get wrong. Where a
+    model does not fill its driven volume — a plinth below the driven height, an
+    overhanging worktop — the author nudges the joint origin, which they would be
+    doing anyway.
 
-# Human labels for the dialog, in the same order.
-ANCHOR_AT_LABELS = {
-    ANCHOR_CENTRE: "centre of the box",
-    ANCHOR_FRONT_CENTRE: "centre of the box's front face",
-    ANCHOR_BOTTOM_CENTRE: "centre of the box's bottom face",
-    ANCHOR_BOTTOM_FRONT_CENTRE: "middle of the box's bottom front edge",
-}
+    The front face is the one to fix on because Fusion snaps a joint origin to a
+    face centre readily (an earlier version required the model's CENTRE, which
+    Fusion gives you no way to snap to, and every child landed half a depth out),
+    and because it is the same face already picked in the layout.
 
+    This holds only because the box drives width, depth AND height, so the
+    model's driven volume matches the box and aligning one consistent reference
+    aligns everything. A future feature that let a mother ignore one of those
+    dimensions would need this revisited.
 
-def anchor_target(centre, frame, dims_cm, anchor_at):
-    """The world point the mother's anchor should land on.
-
-    ``centre`` and ``dims_cm`` come from extents_in_frame; ``frame`` is
-    (width, depth, up). "Front" is the -depth end of the box, because depth runs
-    INTO the volume from the selected front face, and "bottom" is the -up end.
-
-    An unrecognised choice falls back to the centre rather than raising: a
-    hand-edited or future-version attribute should misplace nothing worse than
-    the original behaviour did.
+    "Front" is the -depth end: depth runs INTO the volume from the selected face.
     """
-    _width, depth, up = frame
-    _w, d, h = dims_cm
-    back_off = d / 2.0 if anchor_at in (ANCHOR_FRONT_CENTRE,
-                                        ANCHOR_BOTTOM_FRONT_CENTRE) else 0.0
-    down_off = h / 2.0 if anchor_at in (ANCHOR_BOTTOM_CENTRE,
-                                        ANCHOR_BOTTOM_FRONT_CENTRE) else 0.0
-    return tuple(centre[k] - depth[k] * back_off - up[k] * down_off
-                 for k in range(3))
+    _width, depth, _up = frame
+    _w, d, _h = dims_cm
+    return tuple(centre[k] - depth[k] * (d / 2.0) for k in range(3))
 
 
 def default_mother_setup():
-    return {"v": 1, "anchor": "", "front": "-Y", "anchorAt": ANCHOR_CENTRE,
+    return {"v": 1, "anchor": "", "front": "-Y",
             "params": {"width": "", "depth": "", "height": ""}}
 
 
@@ -93,14 +77,10 @@ def migrate_mother_setup(data):
     params = data.get("params")
     params = params if isinstance(params, dict) else {}
     front = data.get("front")
-    anchor_at = data.get("anchorAt")
     return {
         "v": 1,
         "anchor": str(data.get("anchor") or ""),
         "front": front if front in FRONT_AXES else "-Y",
-        # A mother prepared before this field existed keeps the original
-        # centre-based behaviour rather than silently moving its children.
-        "anchorAt": anchor_at if anchor_at in ANCHOR_AT_CHOICES else ANCHOR_CENTRE,
         "params": {k: str(params.get(k) or "")
                    for k in ("width", "depth", "height")},
     }
@@ -145,20 +125,11 @@ def _version(value):
 
 
 def new_child_recipe(slot_id, mother, config, sheet_url, tab, dims_cm,
-                     bodies, built_at, anchor_at=""):
+                     bodies, built_at):
     """The record a child carries so it can be rebuilt later.
 
     ``built_at`` is supplied by the caller rather than generated here, so this
     module stays free of wall-clock dependencies and its tests stay deterministic.
-
-    ``anchor_at`` records which reference point of the box the mother's anchor was
-    placed on WHEN THIS CHILD WAS BUILT. It is deliberately stored rather than
-    re-read from the mother, for the same reason ``dims_cm`` is: detecting that a
-    box has moved means recomputing the placement the child *should* have and
-    comparing, and that recomputation needs the rule that was actually applied.
-    Reading the mother's current setting instead would need every mother opened
-    just to draw a dialog, and would call a child "moved" when in fact its
-    mother's rule had changed — a different thing, needing a different message.
     """
     mother = mother if isinstance(mother, dict) else {}
     w, d, h = dims_cm
@@ -174,10 +145,6 @@ def new_child_recipe(slot_id, mother, config, sheet_url, tab, dims_cm,
         "dims_cm": {"w": _float(w), "d": _float(d), "h": _float(h)},
         "bodies": [str(b) for b in (bodies or [])],
         "builtAt": str(built_at or ""),
-        # "" means UNKNOWN, not "centre". A child built before this field existed
-        # was placed by a rule we cannot recover, and guessing "centre" would make
-        # every front-centre child read as permanently moved.
-        "anchorAt": anchor_at if anchor_at in ANCHOR_AT_CHOICES else "",
     }
 
 
@@ -199,11 +166,7 @@ def migrate_child_recipe(data):
         tab=data.get("tab"),
         dims_cm=(_float(dims.get("w")), _float(dims.get("d")), _float(dims.get("h"))),
         bodies=bodies,
-        built_at=data.get("builtAt"),
-        # new_child_recipe coerces anything unrecognised to "" (unknown), so a
-        # hand-edited or future-version value degrades to "cannot compare"
-        # rather than to a plausible-looking wrong rule.
-        anchor_at=data.get("anchorAt"))
+        built_at=data.get("builtAt"))
 
 
 UP = (0.0, 0.0, 1.0)

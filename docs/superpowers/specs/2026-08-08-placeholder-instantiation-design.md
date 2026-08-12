@@ -59,7 +59,7 @@ top.
 | How W/D/H map to parameters | Picked **once per mother**, stored as a document attribute on the mother |
 | How the mother declares its facing | Explicit `front` axis (`+X`/`-X`/`+Y`/`-Y`) in the same mapping, **not** inferred from joint-origin orientation |
 | How the mother declares its anchor | A **named joint origin** — survives parametric change where a face reference would not |
-| Where the anchor lands | At the **box's centre**. One rule; offsets are achieved by moving the anchor |
+| Where the anchor lands | On the centre of the **box's front face**. One rule, no setting; offsets are achieved by moving the joint origin. Originally the box's *centre*, which Fusion gives no way to snap to, so a front-face anchor placed every child half a depth back. Briefly a four-option choice in 1.15.0, then collapsed again in 1.16.0: the frame fixes the rotation, and the author already controls all three remaining degrees of freedom by where the origin goes, so a menu added no capability and one more silent failure mode. Holds only because the box drives width, depth **and** height, so the model's driven volume matches the box |
 | How orientation is chosen | User selects the **front face** of the box; height is always world `+Z` |
 | Placeholder authoring | User models them freely as **bodies**, conventionally grouped in a `Layout` component and placed first in the timeline. Neither the grouping nor the ordering is enforced — placeholders are found by attribute, not by location |
 | What happens to a filled placeholder | Hidden (`isLightBulbOn = False`), never deleted — roll back past the children to see the conceptual layout |

@@ -27,31 +27,25 @@ Identical to Plan 1 — reproduced here because a task's implementer may only se
 
 ## READ FIRST — what changed in Plan 1 after this plan was written
 
-Plan 1 shipped as 1.15.0 and moved underneath this plan. Six things here are stale,
-and the first would produce a visibly broken dialog:
+Plan 1 shipped (1.14.0 through 1.16.0) and moved underneath this plan. Five things
+here are stale, and the first would produce a visibly broken dialog:
 
-1. **The anchor no longer lands on the box centre.** A mother now records
-   `anchorAt` — one of `centre`, `front_centre`, `bottom_centre`,
-   `bottom_front_centre` — because Fusion snaps a joint origin to face centres and
-   the centre-only rule put every child half a depth out of place. So the expected
-   placement is `occurrence_matrix(anchor_target(centre, frame, dims, anchorAt),
-   frame)`, **not** `occurrence_matrix(centre, frame)`. Getting this wrong makes
-   every non-centre-anchored child read as permanently `moved`, pre-ticking the
-   whole kitchen on every run.
-2. **The child records which rule placed it.** `childRecipe['anchorAt']` holds the
-   value that was applied. Use that, not the mother's current setting — reading the
-   mother would mean opening every mother just to draw the dialog. `""` means
-   UNKNOWN (a child built before the field existed): report movement as
-   undetectable for those rather than guessing `centre` and crying `moved`.
-3. **`find_children(design)` returns `(found, moved)`**, not one dict. `moved` maps
+1. **The anchor lands on the centre of the box's FRONT face, not its centre.** So
+   the expected placement is `occurrence_matrix(anchor_target(centre, frame, dims),
+   frame)`, **not** `occurrence_matrix(centre, frame)`. Get this wrong and every
+   child reads as permanently `moved`, pre-ticking the whole kitchen on every run.
+   There is exactly one rule and nothing per-mother or per-child to consult —
+   1.15.0 briefly had a four-option `anchorAt` setting and 1.16.0 removed it, so
+   ignore any reference to that field.
+2. **`find_children(design)` returns `(found, moved)`**, not one dict. `moved` maps
    slot id → a message for children that exist but sit outside the top level and so
    cannot be safely rebuilt.
-4. **`attribute_list` and `find_slot_bodies` already exist** in
+3. **`attribute_list` and `find_slot_bodies` already exist** in
    `placeholder_cmds.py` — Plan 1 Task 9 needed them. Do not redefine them.
-5. **A config is optional.** `recipe['config']` may be `""`, meaning size-only with
+4. **A config is optional.** `recipe['config']` may be `""`, meaning size-only with
    no sheet involved, and `sheetUrl`/`tab` are `""` too. Never read a sheet for
    those children.
-6. **The version stub below says 1.15.0, which is taken.** This work is 1.16.0.
+5. **The version stubs below are stale.** 1.16.0 is taken; this work is 1.17.0.
 
 Everything else in this plan still holds: the pure decision logic, the table
 dialog, the phasing, and the reuse of `rebuild_child` for the actual work.
@@ -88,13 +82,7 @@ that asks for a face again. Silent wrong sizing is the failure this avoids.
   - `child_status(recipe, current_version, box_dims_cm, moved, rotated, mother_found, box_found) -> dict` with keys `staleness`, `resized`, `moved`, `rotated`, `problem`, `tick`
   - `status_label(status) -> str`
 
-**Additional test required, from the READ FIRST notes.** `moved` is passed in, so
-`child_status` itself is unaffected by `anchorAt` — but the caller can no longer
-detect movement when a child's rule is unknown. Add a case asserting that a child
-whose `anchorAt` is `""` reports movement as undetectable rather than as `moved`,
-and decide the label for it (suggest `"anchor rule unknown — re-fill to enable
-move detection"`). Without this, the ~dozen children built by 1.15.0 before the
-field existed would each need a manual re-fill for no visible reason.
+
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -423,18 +411,11 @@ def survey_children(design):
                     width, depth, height, centre = placeholder_core.extents_in_frame(
                         vertices, frame)
                     dims = (width, depth, height)
-                    # The anchor does NOT necessarily land on the box centre — see
-                    # READ FIRST. Compare against the placement THIS child's own
-                    # recorded rule implies. An empty anchorAt means the rule is
-                    # unknown (built before the field existed), and guessing
-                    # 'centre' there would report every front-centre child as
-                    # moved, so leave matrix None and let child_status say the
-                    # comparison is unavailable.
-                    if recipe['anchorAt']:
-                        matrix = placeholder_core.occurrence_matrix(
-                            placeholder_core.anchor_target(
-                                centre, frame, dims, recipe['anchorAt']),
-                            frame)
+                    # The anchor lands on the box's FRONT FACE centre, not its
+                    # centre — see READ FIRST. Comparing against the centre would
+                    # report every child as moved.
+                    matrix = placeholder_core.occurrence_matrix(
+                        placeholder_core.anchor_target(centre, frame, dims), frame)
             except Exception:
                 body = None
 
@@ -857,14 +838,14 @@ git commit -m "feat: Update Children rebuilds picked children and records the ne
 
 - [ ] **Step 1: Bump the manifest version**
 
-In `SheetVariants/SheetVariants.manifest`, change `"version": "1.15.0"` to `"version": "1.16.0"`.
+In `SheetVariants/SheetVariants.manifest`, change `"version": "1.16.0"` to `"version": "1.17.0"`.
 
 - [ ] **Step 2: Add the CHANGELOG entry**
 
 In `CHANGELOG.md`, directly below the `## Planned / ideas` section and above `## 1.14.0`, insert:
 
 ```markdown
-## 1.16.0 — Update children
+## 1.17.0 — Update children
 
 - **Update Children** — one dialog listing every child in the layout, grouped by
   its mother and showing that mother's stored version against its current one.
