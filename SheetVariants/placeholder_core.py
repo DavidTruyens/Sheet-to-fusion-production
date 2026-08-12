@@ -376,6 +376,15 @@ STALE_UNKNOWN = "unknown"
 STALE_CURRENT = "up_to_date"
 STALE_OUT_OF_DATE = "out_of_date"
 
+# child_status()'s problem string for "this child's mother could not be
+# resolved at all" (deleted, or never known to this add-in). Exported so a
+# caller that needs to dispatch on it — placeholder_cmds._mother_heading does,
+# to word a dialog heading differently for a missing mother — can compare
+# against this constant instead of a literal copy of the prose, which
+# rebuild_child's own docstring calls out as exactly the coupling to avoid:
+# rewording the message here would otherwise silently break that caller.
+PROBLEM_MOTHER_NOT_FOUND = "mother not found"
+
 # A micron. Below this, a dimension difference is floating-point noise from
 # measuring the same box twice, not a resize the user made.
 _DIMS_TOLERANCE_CM = 1e-4
@@ -444,7 +453,7 @@ def child_status(recipe, current_version, box_dims_cm, moved, rotated,
     status = {"staleness": STALE_UNKNOWN, "resized": False, "moved": False,
               "rotated": False, "problem": "", "tick": False}
     if not mother_found:
-        status["problem"] = "mother not found"
+        status["problem"] = PROBLEM_MOTHER_NOT_FOUND
         return status
     if not box_found:
         status["problem"] = "placeholder missing"

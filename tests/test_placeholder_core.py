@@ -717,6 +717,16 @@ def test_child_status_missing_mother_is_a_problem_and_not_ticked():
     assert pc.status_label(s) == "mother not found"
 
 
+def test_child_status_missing_mother_problem_matches_exported_constant():
+    # placeholder_cmds._mother_heading dispatches on PROBLEM_MOTHER_NOT_FOUND
+    # instead of a literal copy of this prose (see that constant's own
+    # docstring). Pin that child_status actually sets the exported constant's
+    # value, so rewording the message here cannot silently decouple from that
+    # caller without this test failing first.
+    s = pc.child_status(_stored(), None, (60.0, 58.0, 72.0), False, False, False, True)
+    assert s["problem"] == pc.PROBLEM_MOTHER_NOT_FOUND
+
+
 def test_child_status_missing_placeholder_is_a_problem():
     s = pc.child_status(_stored(), 12, None, False, False, True, False)
     assert s["problem"] == "placeholder missing"

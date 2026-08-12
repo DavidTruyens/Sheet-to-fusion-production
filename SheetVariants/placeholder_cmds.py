@@ -596,14 +596,25 @@ UPDATE_CMD_DESC = ('Rebuild children whose mother model has moved on, or whose '
 _survey = []
 
 
+def _version_text(version):
+    """'vN', or an honest 'unknown version' rather than the literal 'vNone' a
+    bare '{}'.format(None) would produce for a recipe whose mother.version was
+    never resolved — matching the wording placeholder_core.status_label
+    already uses for the same case in the row's own status column."""
+    return 'v{}'.format(version) if version is not None else 'unknown version'
+
+
 def _mother_heading(row):
     recipe = row['recipe']
     stored = recipe['mother']['version']
-    if row['status']['problem'] == 'mother not found':
+    # Compare against the exported constant, not a literal copy of the prose
+    # — see PROBLEM_MOTHER_NOT_FOUND's own docstring in placeholder_core.
+    if row['status']['problem'] == placeholder_core.PROBLEM_MOTHER_NOT_FOUND:
         return '{} — missing'.format(recipe['mother']['name'] or '(unnamed)')
     if row['status']['staleness'] == placeholder_core.STALE_OUT_OF_DATE:
-        return '{} — v{} is out of date'.format(recipe['mother']['name'], stored)
-    return '{} — v{}'.format(recipe['mother']['name'], stored)
+        return '{} — {} is out of date'.format(recipe['mother']['name'],
+                                               _version_text(stored))
+    return '{} — {}'.format(recipe['mother']['name'], _version_text(stored))
 
 
 class UpdateCreatedHandler(adsk.core.CommandCreatedEventHandler):
@@ -1438,9 +1449,10 @@ def update_children(rows):
     already did it. What survey_children could NOT hand over is a live
     Occurrence: Phase 1 activates one or more mother documents before Phase 2
     ever runs, and activating a document invalidates every live reference to
-    another one — including row['occurrence'], captured back when the dialog
-    was created. Phase 2 re-resolves every occurrence fresh via find_children
-    instead, exactly as build_children's own Phase 2 does.
+    another one, so a row never carries an occurrence at all (see
+    survey_children's own comment on the point). Phase 2 re-resolves every
+    occurrence fresh via find_children instead, exactly as build_children's
+    own Phase 2 does.
     """
     layout_doc = app.activeDocument
     import SheetVariants
@@ -1508,6 +1520,39 @@ def update_children(rows):
                 try:
                     doc.activate()
                     adsk.doEvents()
+                    # Document.activate() returns a bool this add-in has
+                    # never checked — build_children gets away with that
+                    # because it only ever activates ONE mother per run. This
+                    # loop activates SEVERAL in sequence inside one execute
+                    # handler: if a later activate() silently no-ops,
+                    # app.activeProduct keeps describing whatever mother was
+                    # active before it, and every read below —
+                    # mother_design, read_mother_setup,
+                    # validate_mother_setup, and _snapshot_for's own drive —
+                    # would then work against the WRONG mother while this
+                    # group's version and config are stamped onto its
+                    # children regardless. That is silently wrong geometry
+                    # with no loud edge, so confirm the switch actually
+                    # landed before trusting anything read from
+                    # app.activeProduct. Raising here is caught by this
+                    # try's own except below, which fails every not-yet-
+                    # attempted row in THIS mother's group without aborting
+                    # any other mother's — matching how _open_mother's own
+                    # refusal just above is handled.
+                    active = app.activeDocument
+                    try:
+                        # Guarded: a scratch document with no saved file
+                        # raising here must not be mistaken for the real
+                        # failure this check exists to catch — it simply
+                        # cannot be the mother asked for either way, so it
+                        # falls through to the mismatch below.
+                        active_file = active.dataFile if active else None
+                    except Exception:
+                        active_file = None
+                    if not active_file or active_file.id != file_id:
+                        raise RuntimeError(
+                            'could not switch to the mother "{}" — another '
+                            'document was active instead'.format(mother_name))
                     mother_design = adsk.fusion.Design.cast(app.activeProduct)
                     setup = read_mother_setup(mother_design)
                     errors = placeholder_core.validate_mother_setup(setup)
@@ -1683,8 +1728,8 @@ def update_children(rows):
 
         # Re-resolve every child's occurrence AFTER the document switch. Phase
         # 1 activated one or more mother documents above, which invalidates
-        # every live reference to the layout — including row['occurrence'],
-        # captured by survey_children back when the dialog was created. One
+        # every live reference to the layout — which is exactly why
+        # survey_children never put one on a row to begin with. One
         # attribute scan for the whole run, exactly matching build_children's
         # own Phase 2 re-lookup (find_slot_bodies/find_children).
         try:
@@ -1862,9 +1907,16 @@ def survey_children(design):
         moved = bool(matrix) and placeholder_core.matrices_differ(
             matrix, list(occurrence.transform2.asArray()))
         rows.append({
-            'occurrence': occurrence,
+            # occurrence/body are used only above, to measure THIS row right
+            # now — deliberately not carried on it. update_children's Phase 1
+            # activates one or more mother documents before its own Phase 2
+            # ever runs, which invalidates every live reference to the layout
+            # captured here, occurrence and body included; keeping either on
+            # the row would be exactly the stale-handle hazard
+            # build_children's own slot.pop('body', ...) exists to avoid.
+            # update_children's Phase 2 re-resolves both fresh via
+            # find_children instead.
             'recipe': recipe,
-            'body': body,
             'dims_cm': dims,
             'matrix': matrix,
             'name': occurrence.component.name,
@@ -1898,8 +1950,7 @@ def survey_children(design):
                 continue
             recipe, name = info
             rows.append({
-                'occurrence': None, 'recipe': recipe, 'body': None,
-                'dims_cm': None, 'matrix': None, 'name': name,
+                'recipe': recipe, 'dims_cm': None, 'matrix': None, 'name': name,
                 # mother_found/box_found are fixed here rather than resolved: this
                 # row can never be rebuilt regardless of either, and both early
                 # returns inside child_status leave every other field (staleness,
@@ -1910,5 +1961,21 @@ def survey_children(design):
                     problem=message),
             })
 
-    rows.sort(key=lambda r: (r['recipe']['mother']['name'], r['name']))
+    # The dialog's heading (_mother_heading) is per (mother, stored version):
+    # it always embeds the stored version verbatim, and re-emits whenever
+    # that text changes. Sorting on mother name alone leaves one mother's
+    # rows contiguous while their headings are not — fill six boxes off a
+    # mother, save it, fill three more, and headings would re-emit and
+    # alternate row by row instead of appearing once. Adding the stored
+    # version to the sort key makes each version a clean, contiguous
+    # subgroup, matching one heading per (mother, version) rather than per
+    # mother name alone. None (a version that was never resolved) must never
+    # be compared directly against an int — that raises TypeError in Python
+    # 3 — so it is keyed to sort after every real version instead.
+    def _version_key(version):
+        return (version is None, version if version is not None else 0)
+
+    rows.sort(key=lambda r: (r['recipe']['mother']['name'],
+                             _version_key(r['recipe']['mother']['version']),
+                             r['name']))
     return rows
