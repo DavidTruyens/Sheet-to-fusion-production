@@ -1287,3 +1287,114 @@ def build_children(slots, mother, config):
             pass
 
     return report + failures
+
+
+def _current_versions(recipes):
+    """{fileId: versionNumber or None}, resolving each mother exactly once. A
+    kitchen has a handful of mothers, so one data-panel lookup each is cheap; doing
+    it per child would not be."""
+    versions = {}
+    for recipe in recipes:
+        file_id = recipe['mother']['fileId']
+        if not file_id or file_id in versions:
+            continue
+        try:
+            data_file = app.data.findFileById(file_id)
+            versions[file_id] = data_file.versionNumber if data_file else None
+        except Exception:
+            versions[file_id] = None
+    return versions
+
+
+def survey_children(design):
+    """Everything the Update dialog needs, resolved once.
+
+    Each child's front direction is recovered from its own occurrence transform,
+    because the face the user picked at fill time is not stored. That is exact for
+    a box that moved or resized; a rotated box is detected by is_axis_aligned and
+    reported rather than silently mis-measured.
+    """
+    found, moved_out = find_children(design)
+    slot_bodies = find_slot_bodies(design)
+    versions = _current_versions([recipe for _occ, recipe in found.values()])
+
+    rows = []
+    for slot_id, (occurrence, recipe) in found.items():
+        body = slot_bodies.get(slot_id)
+        current = versions.get(recipe['mother']['fileId'])
+        mother_found = current is not None
+        dims = matrix = None
+        rotated = False
+
+        if body is not None:
+            try:
+                live = list(occurrence.transform2.asArray())
+                frame = placeholder_core.frame_from_matrix(live)
+                vertices = _body_vertices(body)
+                rotated = not placeholder_core.is_axis_aligned(vertices, frame)
+                if not rotated:
+                    width, depth, height, centre = placeholder_core.extents_in_frame(
+                        vertices, frame)
+                    dims = (width, depth, height)
+                    # The anchor lands on the centre of the box's FRONT FACE, not
+                    # its geometric centre — anchor_target, not the bare centre.
+                    # Comparing against the centre directly would report every
+                    # child as moved, since the two only coincide by accident.
+                    matrix = placeholder_core.occurrence_matrix(
+                        placeholder_core.anchor_target(centre, frame, dims), frame)
+            except Exception:
+                body = None
+
+        moved = bool(matrix) and placeholder_core.matrices_differ(
+            matrix, list(occurrence.transform2.asArray()))
+        rows.append({
+            'occurrence': occurrence,
+            'recipe': recipe,
+            'body': body,
+            'dims_cm': dims,
+            'matrix': matrix,
+            'name': occurrence.component.name,
+            'status': placeholder_core.child_status(
+                recipe, current, dims, moved, rotated,
+                mother_found, body is not None),
+        })
+
+    # find_children's second dict is DISJOINT from its first: its loop puts each
+    # slot id into `found` OR `moved`, never both (each branch `continue`s), so
+    # `found.get(slot_id)` here would always miss and silently drop the row.
+    # find_children's internal scan already parsed each of these recipes once to
+    # build its message, but does not hand the recipe back — so it is re-read
+    # here, the only way to get the mother name (for sorting) and child name (for
+    # the row) without reaching into find_children's internals. Skipped entirely
+    # when nothing is moved out, so the common case costs no extra attribute scan.
+    if moved_out:
+        moved_info = {}
+        for attribute in attribute_list(design.findAttributes(
+                placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR)):
+            try:
+                recipe = placeholder_core.loads_attr(
+                    attribute.value, placeholder_core.migrate_child_recipe)
+                if recipe['slotId'] in moved_out:
+                    moved_info[recipe['slotId']] = (recipe, attribute.parent.name)
+            except Exception:
+                continue
+        for slot_id, message in moved_out.items():
+            info = moved_info.get(slot_id)
+            if not info:
+                continue
+            recipe, name = info
+            rows.append({
+                'occurrence': None, 'recipe': recipe, 'body': None,
+                'dims_cm': None, 'matrix': None, 'name': name,
+                # mother_found/box_found are fixed here rather than resolved: this
+                # row can never be rebuilt regardless of either, and both early
+                # returns inside child_status leave every other field (staleness,
+                # resized, moved, rotated, tick) at the same default — only
+                # "problem" differs, which is overwritten right below anyway.
+                'status': dict(placeholder_core.child_status(
+                    recipe, None, None, False, False, True, False),
+                    problem=message),
+            })
+
+    rows.sort(key=lambda r: (r['recipe']['mother']['name'], r['name']))
+    return rows
