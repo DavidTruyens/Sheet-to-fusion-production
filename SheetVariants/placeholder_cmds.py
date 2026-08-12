@@ -686,10 +686,8 @@ class UpdateExecuteHandler(adsk.core.CommandEventHandler):
             if not picked:
                 ui.messageBox('Nothing ticked — nothing to update.')
                 return
-            ui.messageBox('DRY RUN — would rebuild:\n\n'
-                          + '\n'.join('{} ({})'.format(r['name'],
-                                                       placeholder_core.status_label(r['status']))
-                                      for r in picked))
+            report = update_children(picked)
+            ui.messageBox('\n'.join(report) if report else 'Nothing was updated.')
         except Exception:
             ui.messageBox('Update Children failed:\n' + traceback.format_exc())
 
@@ -1390,6 +1388,259 @@ def build_children(slots, mother, config):
                 doc.close(False)
             except Exception:
                 pass
+        try:
+            adsk.doEvents()
+        except Exception:
+            pass
+
+    return report + failures
+
+
+def update_children(rows):
+    """Rebuild the given children, phased exactly as build_children is: everything
+    needing a mother happens with that mother active, then the layout is
+    reactivated once and every child is swapped in place.
+
+    Children are grouped by mother so each mother is opened once, and within a
+    mother by (config, size) so identical units share one recompute — the same
+    two-level grouping build_children uses, just with several mothers instead
+    of one. One failing mother's children fail only that mother's children —
+    every other mother's children still get their turn — and one failing
+    child fails only that child, never the run.
+
+    Each row already carries its own recipe (what to drive the mother to) and
+    its own current matrix/dims_cm (survey_children's fresh read of the box) —
+    unlike build_children there is no Phase 0 to resolve, since the survey
+    already did it.
+    """
+    layout_doc = app.activeDocument
+    import SheetVariants
+
+    by_mother = {}
+    for row in rows:
+        by_mother.setdefault(row['recipe']['mother']['fileId'], []).append(row)
+
+    snapshots, versions, failures = {}, {}, []
+    # {fileId: (doc, opened_by_us)} — closed only in the OUTER finally, after
+    # Phase 2, because reapply_looks() (called from rebuild_child) still needs
+    # each mother's live Appearance/Material objects until then. Copies
+    # build_children's structure, just keyed by mother since there can be
+    # several open at once here.
+    mother_docs = {}
+    unrestored_by_mother = {}
+    attempted = set()   # id(row) for every row Phase 1 actually got to
+    cancelled = False
+    report = []
+
+    # The progress dialog covers Phase 1 only: driving and recomputing each
+    # mother is the slow part, while Phase 2 just copies snapshots that are
+    # already made — matching build_children's own split.
+    progress = ui.createProgressDialog()
+    progress.isCancelButtonShown = True
+
+    try:
+        try:
+            progress.show('Updating children', 'Child %v of %m', 0, len(rows), 0)
+            done = 0
+            for file_id, group in by_mother.items():
+                if cancelled:
+                    break
+                mother_name = group[0]['recipe']['mother']['name']
+                try:
+                    doc, opened_by_us = _open_mother(file_id)
+                except Exception as err:
+                    # Broader than _open_mother's documented RuntimeError: a
+                    # Fusion API failure opening ONE mother must not sink every
+                    # other mother's children in the same run.
+                    for row in group:
+                        attempted.add(id(row))
+                        failures.append('{} — {}'.format(row['name'], err))
+                        done += 1
+                        progress.progressValue = done
+                    continue
+                mother_docs[file_id] = (doc, opened_by_us)
+                try:
+                    doc.activate()
+                    adsk.doEvents()
+                    mother_design = adsk.fusion.Design.cast(app.activeProduct)
+                    setup = read_mother_setup(mother_design)
+                    errors = placeholder_core.validate_mother_setup(setup)
+                    if errors:
+                        for row in group:
+                            attempted.add(id(row))
+                            failures.append('{} — mother not prepared: {}'.format(
+                                row['name'], '; '.join(errors)))
+                            done += 1
+                            progress.progressValue = done
+                        continue
+                    versions[file_id] = (doc.dataFile.versionNumber
+                                        if doc.dataFile else None)
+                    mother_unrestored = set()
+                    for row in group:
+                        if progress.wasCancelled:
+                            cancelled = True
+                            break
+                        attempted.add(id(row))
+                        recipe = row['recipe']
+                        key = (file_id, recipe['config'],
+                              tuple(round(v, 6) for v in row['dims_cm']))
+                        if key not in snapshots:
+                            try:
+                                # A config is OPTIONAL (since 1.15.0): an empty
+                                # config means size-only — no sheet exists to
+                                # read, and recipe['sheetUrl']/['tab'] are ''
+                                # too, so calling get_rows would fail on a
+                                # perfectly valid child.
+                                if recipe['config']:
+                                    sheet_rows = SheetVariants.get_rows(
+                                        recipe['sheetUrl'] or '',
+                                        recipe['tab'] or None)
+                                    values = _row_values(sheet_rows, recipe['config'])
+                                else:
+                                    values = {}
+                                snapshots[key] = _snapshot_for(
+                                    setup, values, row['dims_cm'], mother_unrestored)
+                            except Exception as err:
+                                # One unusable child must not cost the whole run.
+                                failures.append('{} — {}'.format(row['name'], err))
+                        done += 1
+                        progress.progressValue = done
+                    if mother_unrestored:
+                        unrestored_by_mother[file_id] = (mother_name, mother_unrestored)
+                    else:
+                        # Every value driven for THIS mother in this run came
+                        # back exactly as captured — any "modified" flag
+                        # Fusion now shows on it is dirt this add-in's own
+                        # drive-and-restore left behind, not unsaved user
+                        # work. Let _open_mother's isModified check trust that
+                        # for the rest of this session, so a second Update (or
+                        # a Fill) can reuse this mother without a false
+                        # "unsaved changes" refusal.
+                        _cleanly_restored_file_ids.add(file_id)
+                except Exception as err:
+                    # Something unexpected went wrong driving this mother, not
+                    # a per-child snapshot failure (already handled above) —
+                    # fail whatever in this group has not yet been attempted
+                    # rather than aborting every other mother's children.
+                    for row in group:
+                        if id(row) not in attempted:
+                            attempted.add(id(row))
+                            failures.append('{} — {}'.format(row['name'], err))
+                            done += 1
+                            progress.progressValue = done
+        finally:
+            try:
+                progress.hide()
+            except Exception:
+                pass
+
+        # Surface any restore failures ONE time, now that the progress dialog
+        # is (or at least was attempted to be) off screen — not per mother,
+        # and not while a modal progress dialog is still up, which would just
+        # reintroduce the orphaned-dialog problem at a new site (see
+        # build_children's identical comment).
+        if unrestored_by_mother:
+            lines = ['Update Children could not restore every parameter it '
+                    'drove back to its original value:', '']
+            for name, names in sorted(unrestored_by_mother.values(), key=lambda pair: pair[0]):
+                lines.append('"{}": {}'.format(name, ', '.join(sorted(names))))
+            lines.append('')
+            lines.append('These mothers are left MODIFIED with a driven value '
+                         'still applied. Close them WITHOUT SAVING — saving now '
+                         'would make that value permanent.')
+            ui.messageBox('\n'.join(lines))
+
+        # Phase 2 — back in the layout, but every mother opened above is STILL
+        # OPEN: its Appearance/Material objects, referenced live from the
+        # snapshots in `snapshots`, must stay alive until reapply_looks()
+        # (called from rebuild_child) has copied them into the layout's
+        # design. Mothers are only closed in the outer finally, once this
+        # phase is done.
+        layout_doc.activate()
+        adsk.doEvents()
+        design = adsk.fusion.Design.cast(app.activeProduct)
+        tbm = adsk.fusion.TemporaryBRepManager.get()
+        built_at = datetime.datetime.now().isoformat(timespec='seconds')
+
+        for row in rows:
+            if id(row) not in attempted:
+                # Cancellation stopped Phase 1 before this row was ever looked
+                # at — a deliberate cancel must read as a cancellation in the
+                # final report, not as a crash.
+                failures.append('{} — cancelled before it was built.'
+                                .format(row['name']))
+                continue
+            recipe = row['recipe']
+            file_id = recipe['mother']['fileId']
+            key = (file_id, recipe['config'],
+                  tuple(round(v, 6) for v in row['dims_cm']))
+            template = snapshots.get(key)
+            if template is None:
+                continue  # already recorded in failures
+            if not template:
+                failures.append('{} — the mother produced no solid bodies at '
+                                'that size.'.format(row['name']))
+                continue
+
+            # Phase 2 is isolated per child, matching build_children's own
+            # Phase 2: a throw partway through must fail only this one child.
+            try:
+                snaps = [{'temp': tbm.copy(s['temp']), 'appearance': s['appearance'],
+                         'material': s['material'], 'name': s['name']}
+                        for s in template]
+                # rebuild_child reports an expected failure (an old base
+                # feature, a stale recipe, a downstream feature that could not
+                # recompute) via its (ok, line) return rather than raising, so
+                # branch on ok — not on line's wording, which is prose for the
+                # user, not a control signal.
+                ok, line = rebuild_child(design, row['occurrence'], recipe, snaps,
+                                         row['matrix'])
+                if not ok:
+                    # The geometry may be in a bad state: never stamp a fresh
+                    # recipe over a swap that failed. The child keeps its last
+                    # known-good recipe in place for the user to inspect.
+                    failures.append(line)
+                    continue
+                # The base feature's PHYSICAL body order after the swap is not
+                # necessarily new_names' order — see resulting_body_names.
+                # Recording new_names directly here would corrupt the NEXT
+                # rebuild's pairing silently, the same trap build_children's
+                # own rebuild branch guards against.
+                new_names = [s['name'] for s in snaps]
+                body_names = placeholder_core.resulting_body_names(
+                    recipe['bodies'], new_names,
+                    placeholder_core.pair_bodies(recipe['bodies'], new_names))
+                updated = placeholder_core.new_child_recipe(
+                    slot_id=recipe['slotId'],
+                    mother={'fileId': file_id, 'name': recipe['mother']['name'],
+                            'version': versions.get(file_id)},
+                    config=recipe['config'], sheet_url=recipe['sheetUrl'],
+                    tab=recipe['tab'], dims_cm=row['dims_cm'],
+                    bodies=body_names, built_at=built_at)
+                row['occurrence'].component.attributes.add(
+                    placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
+                    placeholder_core.dumps_attr(updated))
+                report.append(line)
+            except Exception as err:
+                failures.append('{} — {}'.format(row['name'], err))
+    finally:
+        # Always return to the layout — on success, on a whole-run failure,
+        # and on cancellation alike — matching build_children's own
+        # unconditional return.
+        try:
+            layout_doc.activate()
+            adsk.doEvents()
+        except Exception:
+            pass
+        # Close only the mothers THIS run opened, now that Phase 2 no longer
+        # needs their live Appearance/Material objects. Guarded so a throw
+        # here cannot mask whatever real exception is already propagating.
+        for doc, opened_by_us in mother_docs.values():
+            if opened_by_us:
+                try:
+                    doc.close(False)
+                except Exception:
+                    pass
         try:
             adsk.doEvents()
         except Exception:
