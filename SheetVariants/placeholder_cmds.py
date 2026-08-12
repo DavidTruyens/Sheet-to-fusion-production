@@ -1411,9 +1411,13 @@ def _exc_text(err):
     em dash when str(err) is empty. That is more likely to happen here than
     elsewhere in this module now that several of update_children's catches
     are deliberately broad `except Exception` — not just the narrow,
-    message-carrying RuntimeErrors this add-in usually raises."""
+    message-carrying RuntimeErrors this add-in usually raises. The type name
+    substitutes ONLY when str(err) is blank — every other exception-to-report
+    site in this module prints the bare message, and a carefully worded
+    RuntimeError (e.g. one of _row_values' own) should keep reading that way
+    rather than gaining a needless 'RuntimeError: ' prefix."""
     text = str(err)
-    return '{}: {}'.format(type(err).__name__, text) if text else type(err).__name__
+    return text if text else type(err).__name__
 
 
 def update_children(rows):
@@ -1570,9 +1574,23 @@ def update_children(rows):
                                 # per run, as build_children does) because
                                 # different children of the same mother can
                                 # carry different configs.
+                                # Re-derived fresh here, not read off the
+                                # `mother_design` captured before this loop
+                                # started: by the 2nd or later distinct key, a
+                                # prior row's _snapshot_for has already
+                                # driven and recomputed the model at least
+                                # once, and build_engine._design()'s
+                                # docstring is explicit that a Design handle
+                                # held across a parameter write can already
+                                # be dead — this check would then fail loudly
+                                # on a live mother for no real reason, and
+                                # refuse every sibling sharing the same key
+                                # too (see failed_keys).
+                                current_design = adsk.fusion.Design.cast(
+                                    app.activeProduct)
                                 missing_columns = sorted(
                                     name for name in values
-                                    if not mother_design.allParameters.itemByName(name))
+                                    if not current_design.allParameters.itemByName(name))
                                 if missing_columns:
                                     raise RuntimeError(
                                         'these columns do not match any parameter '
@@ -1670,9 +1688,9 @@ def update_children(rows):
         # attribute scan for the whole run, exactly matching build_children's
         # own Phase 2 re-lookup (find_slot_bodies/find_children).
         try:
-            children, _moved = find_children(design)
+            children, moved = find_children(design)
         except Exception as err:
-            children = {}
+            children, moved = {}, {}
             failures.append('Could not re-find children after returning to '
                             'the layout: {}'.format(_exc_text(err)))
 
@@ -1705,10 +1723,19 @@ def update_children(rows):
 
                 fresh = children.get(recipe['slotId'])
                 if not fresh:
-                    failures.append(
-                        '{} — its occurrence could not be re-found in the '
-                        'layout after switching back from the mother; '
-                        'skipped.'.format(row['name']))
+                    if recipe['slotId'] in moved:
+                        # A better, more actionable reason than the generic
+                        # one below: the child still exists, it has just been
+                        # dragged into a sub-assembly between the dialog
+                        # opening and OK, matching build_children's own
+                        # wording for the same situation.
+                        failures.append('{} — {}.'.format(
+                            row['name'], moved[recipe['slotId']]))
+                    else:
+                        failures.append(
+                            '{} — its occurrence could not be re-found in the '
+                            'layout after switching back from the mother; '
+                            'skipped.'.format(row['name']))
                     continue
                 occurrence, _current_recipe = fresh
 
