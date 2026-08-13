@@ -232,17 +232,50 @@ def save_design_url(design, url):
 # --------------------------------------------------------------------------- #
 # Core work.
 # --------------------------------------------------------------------------- #
-def iter_solid_bodies(design):
-    """Yield every solid BRepBody in the design (root plus all occurrences),
-    as proxies positioned in their assembly-context (world) location."""
+def _occurrence_solid_bodies(occ, off):
+    """Solid bodies of an occurrence and its descendants, pruning any component
+    in ``off`` along with everything beneath it.
+
+    Component names are unique within a Fusion design, so a name in ``off``
+    identifies one component wherever it sits in the tree; the check is applied
+    at every depth rather than only at the top, which keeps the answer the same
+    whether a component is placed at the root or nested.
+    """
+    try:
+        name = occ.component.name
+    except Exception:
+        name = ''
+    if name in off:
+        return
+    for b in occ.bRepBodies:
+        if b.isSolid:
+            yield b
+    for child in occ.childOccurrences:
+        for b in _occurrence_solid_bodies(child, off):
+            yield b
+
+
+def iter_solid_bodies(design, off_names=()):
+    """Yield every solid BRepBody in the design, as proxies positioned in their
+    assembly-context (world) location, skipping components switched off for
+    this variant.
+
+    Walks down from root.occurrences rather than flattening with
+    allOccurrences, so an off component can take its whole subtree with it.
+    Filtering a flat list afterwards would mean comparing body proxies for
+    identity, which this avoids entirely.
+
+    Bodies owned by the root component itself belong to no occurrence, so no
+    column can address them; they are always included.
+    """
+    off = set(off_names or ())
     root = design.rootComponent
     for b in root.bRepBodies:
         if b.isSolid:
             yield b
-    for occ in root.allOccurrences:
-        for b in occ.bRepBodies:
-            if b.isSolid:
-                yield b
+    for occ in root.occurrences:
+        for b in _occurrence_solid_bodies(occ, off):
+            yield b
 
 
 def component_names(design):
@@ -259,38 +292,72 @@ def component_names(design):
     return names
 
 
-def resolve_whole_model(design, profile):
-    """Every solid body in the design (root plus all occurrences)."""
-    return list(iter_solid_bodies(design)), []
+def top_level_component_names(design):
+    """Distinct component names among the root's DIRECT children, in order of
+    first appearance. These are the only components a sheet column can switch
+    off — deliberately narrower than component_names(), which reaches every
+    depth and backs the export-profile picker."""
+    names, seen = [], set()
+    for occ in design.rootComponent.occurrences:
+        try:
+            n = occ.component.name
+        except Exception:
+            continue
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+    return names
 
 
-def _component_solid_bodies(design, included_names):
+def resolve_whole_model(design, profile, off_names=()):
+    """Every solid body in the design, minus components switched off for this
+    variant."""
+    return list(iter_solid_bodies(design, off_names)), []
+
+
+def _component_solid_bodies(design, included_names, off_names=()):
     """Solid bodies of the selected components — one representative occurrence
-    per component name, so a part exports once rather than once per instance."""
+    per component name, so a part exports once rather than once per instance.
+
+    Uses the same pruning walk as iter_solid_bodies, which is what makes a
+    variant's toggles win over a profile's include list: a profile naming a
+    sub-component of a switched-off component finds nothing, because the walk
+    never descends into it.
+    """
+    off = set(off_names or ())
     wanted = set(included_names)
     got = {}
-    for occ in design.rootComponent.allOccurrences:
+
+    def visit(occ):
         try:
             cname = occ.component.name
         except Exception:
-            continue
+            return
+        if cname in off:
+            return                       # prune this component and its subtree
         if cname in wanted and cname not in got:
             bodies = [b for b in occ.bRepBodies if b.isSolid]
             if bodies:
                 got[cname] = bodies
+        for child in occ.childOccurrences:
+            visit(child)
+
+    for occ in design.rootComponent.occurrences:
+        visit(occ)
+
     out = []
     for name in included_names:
         out.extend(got.get(name, []))
     return out
 
 
-def resolve_named_components(design, profile):
+def resolve_named_components(design, profile, off_names=()):
     present = component_names(design)
     included, missing = sheet_core.select_component_names(present, profile.get('components', []))
     warnings = []
     if missing:
         warnings.append("component(s) not found: " + ", ".join(missing))
-    return _component_solid_bodies(design, included), warnings
+    return _component_solid_bodies(design, included, off_names), warnings
 
 
 RESOLVERS = {
