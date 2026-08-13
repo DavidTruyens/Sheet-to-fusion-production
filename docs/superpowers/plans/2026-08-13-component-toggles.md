@@ -728,6 +728,17 @@ git commit -m "feat: name the variants a profile had nothing to build"
 
 **No unit tests.** This module imports `adsk` and cannot be imported outside Fusion; Task 12's manual checklist is its verification. Do not add a test file for it.
 
+> **As shipped (commit `62abc8a`), hardened after review.** The code below reads
+> `occ.bRepBodies`, `occ.childOccurrences` and the root collections unguarded.
+> Hand-rolling the recursion in Python removes the protection Fusion's own
+> `allOccurrences` gave for free: one occurrence that cannot be read would abort
+> the entire collection, and in `_component_solid_bodies` an unreadable component
+> name would silently take every healthy descendant with it. Every such read is
+> therefore guarded and materialised into a list, falling back to empty — so one
+> bad node costs only itself, matching how `snapshot_bodies` skips a body it
+> cannot copy rather than failing the run. Read the committed source for the
+> exact shipped form.
+
 - [ ] **Step 1: Add `top_level_component_names`**
 
 Insert after `component_names` (~line 259):
