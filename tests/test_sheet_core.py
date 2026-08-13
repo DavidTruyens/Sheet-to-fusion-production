@@ -394,3 +394,67 @@ def test_parse_toggle_unrecognised_is_none():
     # rather than silently removing a component.
     for text in ("maybe", "2", "-1", "true-ish", "aan"):
         assert sheet_core.parse_toggle(text) is None, text
+
+
+def test_classify_columns_splits_parameters_and_toggles():
+    cols = sheet_core.classify_columns(
+        ["Name", "length", "Drawer"],
+        param_names={"length"},
+        top_level_names=["Carcass", "Drawer"])
+    assert cols["parameters"] == [(1, "length")]
+    assert cols["toggles"] == [(2, "Drawer")]
+    assert cols["unknown"] == []
+    assert cols["sub_components"] == []
+    assert cols["collisions"] == []
+
+
+def test_classify_columns_parameter_wins_a_collision():
+    # Preserves today's behaviour: a column that matched a parameter before
+    # this feature existed must still be read as a parameter.
+    cols = sheet_core.classify_columns(
+        ["Name", "Door"],
+        param_names={"Door"},
+        top_level_names=["Door"])
+    assert cols["parameters"] == [(1, "Door")]
+    assert cols["toggles"] == []
+    assert cols["collisions"] == ["Door"]
+
+
+def test_classify_columns_flags_a_sub_component():
+    cols = sheet_core.classify_columns(
+        ["Name", "Side_L"],
+        param_names=set(),
+        top_level_names=["Carcass"],
+        all_component_names=["Carcass", "Side_L"])
+    assert cols["sub_components"] == ["Side_L"]
+    assert cols["toggles"] == []
+    assert cols["unknown"] == []
+
+
+def test_classify_columns_flags_an_unknown_header():
+    cols = sheet_core.classify_columns(
+        ["Name", "Drawr"],
+        param_names={"length"},
+        top_level_names=["Drawer"],
+        all_component_names=["Drawer"])
+    assert cols["unknown"] == ["Drawr"]
+    assert cols["sub_components"] == []
+
+
+def test_classify_columns_ignores_column_a_and_strips_whitespace():
+    cols = sheet_core.classify_columns(
+        ["Name", " length ", " Drawer "],
+        param_names={"length"},
+        top_level_names=["Drawer"])
+    assert cols["parameters"] == [(1, "length")]
+    assert cols["toggles"] == [(2, "Drawer")]
+
+
+def test_classify_columns_with_no_components_matches_todays_behaviour():
+    # Called with the defaults, every non-parameter column is unknown, exactly
+    # as before this feature existed.
+    cols = sheet_core.classify_columns(
+        ["Name", "length", "bogus"], param_names={"length"}, top_level_names=[])
+    assert cols["parameters"] == [(1, "length")]
+    assert cols["unknown"] == ["bogus"]
+    assert cols["toggles"] == []

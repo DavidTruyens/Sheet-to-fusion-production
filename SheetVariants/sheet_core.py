@@ -336,6 +336,48 @@ def parse_toggle(text):
     return None
 
 
+def classify_columns(header, param_names, top_level_names, all_component_names=()):
+    """Decide what each header column after "Name" means, against the model.
+
+    A header is a parameter column, a component on/off column, or a problem.
+    Precedence is deliberate: a name that is BOTH a parameter and a top-level
+    component is read as a parameter, so no sheet that worked before this
+    feature can change meaning. The collision is reported so the designer is
+    not left guessing which way it went.
+
+    A header naming a component that exists but is not top-level is separated
+    from a header naming nothing at all, because they need different advice:
+    one is "this cannot be switched off", the other is "this is a typo".
+
+    Column indices are into the ROW, so column A ("Name") is 0 and the first
+    header after it is 1. That is what row_toggles and the build loop index
+    with, so no caller has to remember an offset.
+    """
+    params = set(param_names or ())
+    top_level = set(top_level_names or ())
+    all_components = set(all_component_names or ()) | top_level
+
+    out = {"parameters": [], "toggles": [], "unknown": [],
+           "sub_components": [], "collisions": []}
+    for index, raw in enumerate(header or []):
+        if index == 0:
+            continue                      # column A is the variant name
+        name = (raw or "").strip()
+        if not name:
+            continue
+        if name in params:
+            out["parameters"].append((index, name))
+            if name in top_level:
+                out["collisions"].append(name)
+        elif name in top_level:
+            out["toggles"].append((index, name))
+        elif name in all_components:
+            out["sub_components"].append(name)
+        else:
+            out["unknown"].append(name)
+    return out
+
+
 def _cell_ref(col_index, row_number):
     letters = ""
     n = col_index + 1
