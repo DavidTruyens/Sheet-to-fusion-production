@@ -762,7 +762,8 @@ def _run_build_validation(inputs):
         _build_report['ok'] = False
         return
     rep = sheet_core.validate_mapping(
-        rows[0], rows[1:], known_param_names(design), driveable_param_names(design))
+        rows[0], rows[1:], known_param_names(design), driveable_param_names(design),
+        top_level_component_names(design), component_names(design))
     report_box.formattedText = rep.to_html()
     _build_report['ok'] = rep.ok
 
