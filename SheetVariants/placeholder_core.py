@@ -134,9 +134,10 @@ def new_child_recipe(slot_id, mother, config, sheet_url, tab, dims_cm,
     ``version_id`` is a SECOND way to name the mother's file. The primary
     ``mother.fileId`` is a lineage urn, and Fusion's findFileById has been
     observed refusing one — raising "3 : file not found" for the id a document
-    reports about ITSELF, both offline and online. versionId names a specific
-    version instead, and a mother resolved through either form can report the
-    lineage's latest version, which is what staleness actually needs. Empty for
+    reported about ITSELF (spike 5), then resolving the same kind of id without
+    complaint later (spike 6). Intermittent, so worth a fallback. versionId names
+    a specific version, and spike 6 confirmed that even an OLD version's DataFile
+    reports the lineage's latest version, which is what staleness needs. Empty for
     children built before this field existed; the lineage id still gets tried.
     """
     mother = mother if isinstance(mother, dict) else {}

@@ -2014,13 +2014,14 @@ def _resolve_mother_file(file_id, version_id, open_files):
     already_open = open_files.get(file_id)
     if already_open is not None:
         return already_open
-    # Lineage id FIRST. Its DataFile is the tip by definition, so latestVersionNumber
-    # off it is certainly right. The versionId path is only a workaround for
-    # findFileById refusing a lineage id, and it rests on latestVersionNumber being
-    # a lineage-wide property even on an old version's DataFile — plausible, but
-    # NOT measured by any spike here. Trying it second confines that assumption to
-    # the case where there is no alternative. If it turns out false, the symptom is
-    # a closed mother's children reading "up to date" forever.
+    # Lineage id first, versionId second. Both work: spike 6 measured an OLD
+    # version's DataFile reporting versionNumber 2 alongside latestVersionNumber 3,
+    # so latestVersionNumber IS lineage-wide and a mother resolved either way
+    # answers the staleness question correctly. The lineage id still leads because
+    # its DataFile is the tip by definition and needs no such property; versionId
+    # is the fallback for findFileById refusing a lineage urn, which spike 5 saw
+    # and spike 6 later did not — intermittent, not permanent, which is exactly
+    # what a fallback is for.
     for candidate in (file_id, version_id):
         if not candidate:
             continue
