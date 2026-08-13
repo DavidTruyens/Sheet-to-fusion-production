@@ -419,6 +419,7 @@ class ValidationReport:
         self.errors = []
         self.warnings = []
         self.mapped_columns = 0
+        self.toggle_columns = 0
         self.row_count = 0
 
     @property
@@ -426,12 +427,15 @@ class ValidationReport:
         return not self.errors
 
     def summary(self):
+        # The on/off clause is omitted entirely when there are none, so a
+        # sheet with no toggle columns produces the exact string it always did.
+        toggles = ", {} on/off".format(self.toggle_columns) if self.toggle_columns else ""
         if self.ok and not self.warnings:
-            return "✓ {} columns mapped, {} rows OK".format(
-                self.mapped_columns, self.row_count)
+            return "✓ {} columns mapped{}, {} rows OK".format(
+                self.mapped_columns, toggles, self.row_count)
         if self.ok:
-            return "✓ {} columns mapped, {} rows — {} warning(s)".format(
-                self.mapped_columns, self.row_count, len(self.warnings))
+            return "✓ {} columns mapped{}, {} rows — {} warning(s)".format(
+                self.mapped_columns, toggles, self.row_count, len(self.warnings))
         return "✗ {} error(s), {} warning(s) — fix before building".format(
             len(self.errors), len(self.warnings))
 
@@ -444,7 +448,8 @@ class ValidationReport:
         return "<br/>".join(lines)
 
 
-def validate_mapping(header, rows, known_param_names, driveable_param_names):
+def validate_mapping(header, rows, known_param_names, driveable_param_names,
+                     top_level_names=(), all_component_names=()):
     rep = ValidationReport()
     rep.row_count = len(rows)
     header = [h.strip() for h in header]
@@ -453,24 +458,34 @@ def validate_mapping(header, rows, known_param_names, driveable_param_names):
         rep.errors.append('The first column header must be "Name".')
         return rep
 
-    columns = header[1:]
-    known = set(known_param_names)
-    for name in columns:
-        if name in known:
-            rep.mapped_columns += 1
-        else:
-            rep.errors.append('Column "{}" matches no parameter in the model.'.format(name))
+    cols = classify_columns(header, known_param_names, top_level_names,
+                            all_component_names)
+    rep.mapped_columns = len(cols["parameters"])
+    rep.toggle_columns = len(cols["toggles"])
 
-    covered = set(columns)
+    for name in cols["unknown"]:
+        rep.errors.append(
+            'Column "{}" matches no parameter or top-level component in the model.'
+            .format(name))
+    for name in cols["sub_components"]:
+        rep.errors.append(
+            'Column "{}" is a sub-component — only top-level components can be '
+            'switched on or off.'.format(name))
+    for name in cols["collisions"]:
+        rep.warnings.append(
+            'Column "{}" is both a parameter and a component — read as a parameter.'
+            .format(name))
+
+    covered = set(name for _, name in cols["parameters"])
     for pname in driveable_param_names:
         if pname not in covered:
-            rep.warnings.append('Parameter "{}" has no column — keeps its current value.'.format(pname))
+            rep.warnings.append(
+                'Parameter "{}" has no column — keeps its current value.'.format(pname))
 
     empty_count = 0
+    blank_toggles = 0
     for ri, row in enumerate(rows, start=2):  # row 2 = first data row in the sheet
-        for ci, name in enumerate(columns, start=1):
-            if name not in known:
-                continue
+        for ci, name in cols["parameters"]:
             val = row[ci] if ci < len(row) else ""
             kind = classify_value(val)
             if kind == "comma_decimal":
@@ -479,8 +494,19 @@ def validate_mapping(header, rows, known_param_names, driveable_param_names):
                     .format(_cell_ref(ci, ri), val.strip()))
             elif kind == "empty":
                 empty_count += 1
+        for ci, name in cols["toggles"]:
+            val = row[ci] if ci < len(row) else ""
+            if not (val or "").strip():
+                blank_toggles += 1
+            elif parse_toggle(val) is None:
+                rep.errors.append(
+                    'Cell {} ("{}") is not a yes/no value — use TRUE or FALSE.'
+                    .format(_cell_ref(ci, ri), val.strip()))
     if empty_count:
         rep.warnings.append("{} empty cell(s) left unchanged.".format(empty_count))
+    if blank_toggles:
+        rep.warnings.append(
+            "{} blank on/off cell(s) — those components stay in.".format(blank_toggles))
     return rep
 
 

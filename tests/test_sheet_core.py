@@ -371,6 +371,75 @@ def test_validate_clean_sheet_summary():
     assert "2 columns mapped" in rep.summary()
 
 
+def test_validate_toggle_column_is_accepted():
+    header = ["Name", "diameter", "Drawer"]
+    rows = [["V1", "18 mm", "FALSE"]]
+    rep = sheet_core.validate_mapping(
+        header, rows, {"diameter"}, ["diameter"],
+        top_level_names=["Drawer"], all_component_names=["Drawer"])
+    assert rep.ok
+    assert rep.toggle_columns == 1
+    assert "1 on/off" in rep.summary()
+
+
+def test_validate_summary_unchanged_when_there_are_no_toggles():
+    header = ["Name", "diameter", "hoogte"]
+    rows = [["V1", "18 mm", "5 mm"], ["V2", "20 mm", "6 mm"]]
+    rep = sheet_core.validate_mapping(header, rows, {"diameter", "hoogte"},
+                                      ["diameter", "hoogte"])
+    assert rep.summary() == "✓ 2 columns mapped, 2 rows OK"
+
+
+def test_validate_bad_toggle_value_is_error_with_cell_ref():
+    header = ["Name", "Drawer"]
+    rows = [["V1", "TRUE"], ["V2", "maybe"]]
+    rep = sheet_core.validate_mapping(
+        header, rows, set(), [], top_level_names=["Drawer"])
+    assert not rep.ok
+    assert any("maybe" in e and "B3" in e for e in rep.errors)
+
+
+def test_validate_blank_toggle_cells_are_their_own_warning():
+    header = ["Name", "Drawer"]
+    rows = [["V1", ""], ["V2", ""]]
+    rep = sheet_core.validate_mapping(
+        header, rows, set(), [], top_level_names=["Drawer"])
+    assert rep.ok
+    assert any("2 blank on/off cell(s)" in w and "stay in" in w
+               for w in rep.warnings)
+    # Must NOT be counted as a parameter "empty cell" — that message says
+    # "left unchanged", which is the wrong thing to tell someone about a toggle.
+    assert not any("left unchanged" in w for w in rep.warnings)
+
+
+def test_validate_sub_component_column_is_error():
+    header = ["Name", "Side_L"]
+    rows = [["V1", "TRUE"]]
+    rep = sheet_core.validate_mapping(
+        header, rows, set(), [], top_level_names=["Carcass"],
+        all_component_names=["Carcass", "Side_L"])
+    assert not rep.ok
+    assert any("Side_L" in e and "sub-component" in e for e in rep.errors)
+
+
+def test_validate_unknown_column_mentions_components_now():
+    header = ["Name", "Drawr"]
+    rows = [["V1", "TRUE"]]
+    rep = sheet_core.validate_mapping(
+        header, rows, set(), [], top_level_names=["Drawer"])
+    assert not rep.ok
+    assert any("Drawr" in e and "component" in e for e in rep.errors)
+
+
+def test_validate_collision_is_a_warning_not_an_error():
+    header = ["Name", "Door"]
+    rows = [["V1", "18 mm"]]
+    rep = sheet_core.validate_mapping(
+        header, rows, {"Door"}, ["Door"], top_level_names=["Door"])
+    assert rep.ok
+    assert any("Door" in w and "read as a parameter" in w for w in rep.warnings)
+
+
 def test_parse_toggle_on_words():
     for text in ("TRUE", "true", " True ", "1", "yes", "Y", "on", "ON"):
         assert sheet_core.parse_toggle(text) is True, text
