@@ -12,13 +12,13 @@ Ordered by value. **Items 1–3 decide whether the feature is trustworthy** — 
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Null test | ⚠️ **partial** — no false `moved`/`resized`, but boxes were at ROOT |
+| 1 | Null test | ✅ **pass** — re-run with nested components; both suspects disproven |
 | 2 | Two-mother run | ⬜ not run — only one mother in the test layout |
 | 3 | Core loop | ✅ **pass** |
 | 4 | Hand-made cut | ⬜ not run |
 | 5 | Move a box | ⬜ not run |
 | 6 | Resize a box | ⬜ not run |
-| 7 | Rotate a box | ✅ **pass** — and exposed a separate false positive, now fixed |
+| 7 | Rotate a box | ✅ **pass** — detected, and the prescribed remedy clears it |
 | 8 | Deleted box / sub-assembly | ⬜ not run |
 | 9 | Isolation | ⬜ not run |
 | 10 | Mothers come back clean | ⬜ not run |
@@ -120,6 +120,15 @@ Change a parameter in mother A, **save** it, close it. Run **Update Children**.
   than the cloud's latest — the survey reads the data panel while the rebuild
   records the open document's version, and those disagree in that case).
 
+## 3b. Fill into nested components *(unplanned — do it, it is cheap)*
+
+> **Status: ✅ pass.** A placeholder box inside a sub-component (`Component13:1`,
+> itself inside a layout component) fills correctly, and Fill's Phase 2 **hides
+> it** — the browser shows the box greyed while its child stands at the top level.
+> Worth recording because `find_slot_bodies` resolves those bodies through an
+> attribute scan rather than the occurrence tree, and until spike 7 it was not
+> known whether that returned world coordinates. It does.
+
 ## 4. The hand-made cut
 
 On the child carrying one, after item 3.
@@ -156,6 +165,13 @@ Say explicitly which of the three happened.
 > Item 7's own remedy — re-run Fill Placeholders — could never have cleared it,
 > because the geometry was never the problem. Fixed in 1.17.2 by judging
 > orientation from flat faces. See *What real use found*.
+>
+> **The remedy is now confirmed to work.** With the fillet fix in, a box measured
+> at 30° against a child at identity (spike 7) read `rotated`; re-running Fill
+> Placeholders on that box alone realigned the child, and all three children then
+> read `up to date`. So the `rotated` report was a TRUE positive throughout — the
+> box had been turned after its child was built — and the earlier "re-filling does
+> not solve it" was the fillet false positive masking a real one.
 
 - **PASS** — reads `rotated — re-run Fill Placeholders`, checkbox **disabled**, not
   pre-selected.
