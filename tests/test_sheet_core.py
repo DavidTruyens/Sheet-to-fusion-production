@@ -572,3 +572,27 @@ def test_row_toggles_rightmost_duplicate_column_wins():
 
 def test_row_toggles_with_no_toggle_columns_is_empty():
     assert sheet_core.row_toggles(["Unit_S", "500 mm"], []) == {}
+
+
+def test_summarize_reports_variants_that_had_nothing_to_build():
+    results = [{"name": "Kitchen", "built": 2, "skipped_variants": ["Unit_X"]}]
+    text = sheet_core.summarize_results(results)
+    assert "Kitchen (2 variant(s))" in text
+    assert "Unit_X" in text
+    assert "nothing to build" in text
+
+
+def test_summarize_combines_warnings_and_skipped_variants():
+    results = [{"name": "Kitchen", "built": 1,
+                "warnings": ["component(s) not found: Ghost"],
+                "skipped_variants": ["Unit_X", "Unit_Y"]}]
+    text = sheet_core.summarize_results(results)
+    assert "Ghost" in text
+    assert "2 variant(s)" in text
+    assert "Unit_X, Unit_Y" in text
+
+
+def test_summarize_unchanged_without_skipped_variants():
+    results = [{"name": "Full model", "built": 3}]
+    assert sheet_core.summarize_results(results) == (
+        "Built:\n  • Full model (3 variant(s))")

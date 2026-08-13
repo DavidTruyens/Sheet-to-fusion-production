@@ -156,7 +156,15 @@ def summarize_results(results):
     if built:
         lines.append("Built:")
         for r in built:
-            warn = (" — " + "; ".join(r["warnings"])) if r.get("warnings") else ""
+            # Variants dropped by their component toggles are reported, never
+            # silent: a variant missing from an output design with no
+            # explanation reads as a bug in the add-in.
+            notes = list(r.get("warnings") or [])
+            dropped = r.get("skipped_variants") or []
+            if dropped:
+                notes.append("{} variant(s) had nothing to build: {}".format(
+                    len(dropped), ", ".join(dropped)))
+            warn = (" — " + "; ".join(notes)) if notes else ""
             lines.append("  • {} ({} variant(s)){}".format(r.get("name", "Export"),
                                                            r.get("built", 0), warn))
     skipped = [r for r in results if r.get("skipped")]
