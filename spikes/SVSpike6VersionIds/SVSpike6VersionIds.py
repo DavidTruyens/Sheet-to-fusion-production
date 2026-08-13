@@ -16,8 +16,10 @@
 #
 # This script measures it. READ-ONLY: it writes nothing and modifies nothing.
 #
-# Setup: open a mother document that has SEVERAL versions (v2 or later), and run
-# this with it active. Nothing needs to be saved first.
+# Setup: have the mother open (Q4 scans EVERY open document, so which tab is
+# active does not matter for it). Q3 needs the ACTIVE document to have several
+# versions — v2 or later — so activate one before running if you can. Nothing
+# needs to be saved first.
 
 import traceback
 
@@ -135,8 +137,58 @@ def run(context):
                     type(err).__name__, err))
                 notes.append('  -> the fallback cannot work; treat it as unknown.')
 
+        # EVERY open document, not just the active one. The disagreement this
+        # is looking for was seen in the wild — a mother saved to v18 read as
+        # v17 — so catching it in its natural state beats asking anyone to
+        # perform a save ritual with the right tab focused.
         notes.append('')
-        notes.append('=== Q4. DOES AN OPEN DOCUMENT KNOW IT WAS JUST SAVED? ===')
+        notes.append('=== Q4. DO OPEN DOCUMENTS AGREE WITH THEMSELVES? ===')
+        notes.append('Update Children refuses to drive a mother whose open version')
+        notes.append('is BEHIND its newest. Any document below whose two numbers')
+        notes.append('disagree is the case that matters — report it.')
+        notes.append('')
+        disagreed = False
+        for i in range(app.documents.count):
+            other = app.documents.item(i)
+            try:
+                other_name = other.name
+                other_file = other.dataFile
+            except Exception as err:
+                notes.append('  document {} unreadable ({})'.format(i, err))
+                continue
+            if not other_file:
+                notes.append('  {!r}: never saved, no DataFile'.format(other_name))
+                continue
+            at = _read(other_file, 'versionNumber', notes, indent='      ')
+            tip = _read(other_file, 'latestVersionNumber', notes, indent='      ')
+            notes.append('  {!r}  (modified={})'.format(
+                other_name, getattr(other, 'isModified', '?')))
+            if at is None or tip is None:
+                notes.append('      -> one number will not read; nothing refused.')
+            elif at == tip:
+                notes.append('      -> agree at v{}; nothing refused.'.format(at))
+            elif at < tip:
+                disagreed = True
+                notes.append('      -> OPEN VERSION IS BEHIND (v{} vs v{}).'
+                             .format(at, tip))
+                notes.append('         Update Children WOULD refuse this mother.')
+                notes.append('         Correct if it really is open at an old')
+                notes.append('         version; a bug if it is not.')
+            else:
+                disagreed = True
+                notes.append('      -> AHEAD (v{} vs v{}) — the record lags the'
+                             .format(at, tip))
+                notes.append('         document. Nothing is refused, and the')
+                notes.append('         version reported takes the higher number.')
+        notes.append('')
+        notes.append('  {}'.format(
+            'SOMETHING DISAGREED — report the block above.' if disagreed
+            else 'Every open document agrees with itself right now.'))
+        notes.append('  To force the interesting case: change a parameter in a')
+        notes.append('  mother, SAVE it, leave it open, and run this again.')
+
+        notes.append('')
+        notes.append('=== Q4b. THE ACTIVE DOCUMENT, IN DETAIL ===')
         notes.append('Update Children refuses to drive a mother whose open version')
         notes.append('is behind its newest, so children are never built from a')
         notes.append('version the dialog did not advertise. That is only safe if')
@@ -151,15 +203,8 @@ def run(context):
             notes.append('     at an older version, that is correct. If it is at')
             notes.append('     the newest, the guard is WRONG and must go.')
         notes.append('')
-        notes.append('  NOW DO THIS, which is the workflow that matters:')
-        notes.append('   1. change a parameter in this mother and SAVE it')
-        notes.append('   2. leave it open')
-        notes.append('   3. run this script again')
-        notes.append('  If versionNumber and latestVersionNumber are still EQUAL')
-        notes.append('  afterwards, the guard is safe and can also protect Fill')
-        notes.append('  Placeholders. If versionNumber lags, the guard would refuse')
-        notes.append('  the commonest workflow there is — report that, because it')
-        notes.append('  then has to be removed rather than extended.')
+        notes.append('  Q4 above covers every open document, so this section is')
+        notes.append('  only a detail view of whichever tab happened to be active.')
 
         text = '\n'.join(notes)
         ui.messageBox(text[:9000])

@@ -68,18 +68,20 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
   network failure is no longer indistinguishable from a deleted file.
 - The status column is wider; it was truncating its own instructions mid-word.
 
-Two things are not yet measured, and `spikes/SVSpike6VersionIds` answers both:
+Measured with `spikes/SVSpike6VersionIds`: `latestVersionNumber` **is**
+lineage-wide — an older version's record reports its own `versionNumber` as 2
+alongside `latestVersionNumber` 3 — so a mother resolved through either id
+answers the staleness question correctly. The same run found `findFileById`
+resolving a lineage urn it had refused earlier, so that failure is intermittent
+rather than permanent, which is what the fallback is for.
 
-- Whether `latestVersionNumber` is lineage-wide on a DataFile resolved from an
-  older version's id. The version-specific id is only consulted when the lineage
-  id fails **and** the mother is closed, and it is tried second for that reason.
-- Which of an open document's version numbers keeps up with its own saves. Real
-  use has now shown they can disagree — a document at v18 alongside a record
-  still reading v17 — so the refusal above triggers only when the open version is
-  genuinely BEHIND, never merely different, and applies to Update Children only:
-  a wrong guess there costs one mother's rows and a clear message, where in Fill
-  Placeholders it would abort the whole run on the commonest workflow there is.
-  Once measured it can cover both.
+Still open: which of an open document's version numbers keeps up with its own
+saves. Real use has shown they can disagree — a document at v18 alongside a
+record still reading v17 — so the refusal above triggers only when the open
+version is genuinely BEHIND, never merely different, and applies to Update
+Children only: a wrong guess there costs one mother's rows and a clear message,
+where in Fill Placeholders it would abort the whole run on the commonest
+workflow there is. Once measured it can cover both.
 
 ## 1.17.0 — Update children
 
