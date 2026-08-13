@@ -471,3 +471,35 @@ def test_classify_columns_reports_a_blank_header():
     assert cols["parameters"] == [(1, "length")]
     assert cols["unknown"] == ["", ""]
     assert cols["toggles"] == []
+
+
+def test_row_toggles_reads_each_column():
+    result = sheet_core.row_toggles(
+        ["Unit_S", "500 mm", "FALSE", "TRUE"],
+        [(2, "Drawer"), (3, "Door")])
+    assert result == {"Drawer": False, "Door": True}
+
+
+def test_row_toggles_treats_a_short_row_as_blank():
+    # Trailing blank cells are often omitted entirely; a missing cell must
+    # mean "in", the same as an explicitly blank one.
+    result = sheet_core.row_toggles(["Unit_S", "500 mm"], [(2, "Drawer")])
+    assert result == {"Drawer": True}
+
+
+def test_row_toggles_keeps_the_component_on_an_unrecognised_value():
+    # Check blocks the build before this can happen. If it ever does, failing
+    # toward keeping the part is the recoverable direction: an extra part is
+    # visible, a missing one is not.
+    result = sheet_core.row_toggles(["Unit_S", "maybe"], [(1, "Drawer")])
+    assert result == {"Drawer": True}
+
+
+def test_row_toggles_rightmost_duplicate_column_wins():
+    result = sheet_core.row_toggles(
+        ["Unit_S", "TRUE", "FALSE"], [(1, "Drawer"), (2, "Drawer")])
+    assert result == {"Drawer": False}
+
+
+def test_row_toggles_with_no_toggle_columns_is_empty():
+    assert sheet_core.row_toggles(["Unit_S", "500 mm"], []) == {}

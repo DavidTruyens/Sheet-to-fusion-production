@@ -382,6 +382,29 @@ def classify_columns(header, param_names, top_level_names, all_component_names=(
     return out
 
 
+def row_toggles(row, toggle_columns):
+    """{component name: is it in} for one variant row.
+
+    A cell the row does not reach is treated as blank (component stays in):
+    a spreadsheet often omits trailing empty cells entirely, and the parameter
+    path already treats a short row the same way.
+
+    An unrecognised value also keeps the component. validate_mapping blocks
+    the build before a build can ever see one, so this is a defensive default
+    rather than a rule — and it fails toward the recoverable direction, since
+    an unwanted part is visible in the output while a missing one is not.
+
+    Keyed by component name, so if the same component is named by two columns
+    the rightmost wins.
+    """
+    out = {}
+    for index, name in toggle_columns or []:
+        raw = row[index] if index < len(row) else ""
+        value = parse_toggle(raw)
+        out[name] = True if value is None else value
+    return out
+
+
 def _cell_ref(col_index, row_number):
     letters = ""
     n = col_index + 1
