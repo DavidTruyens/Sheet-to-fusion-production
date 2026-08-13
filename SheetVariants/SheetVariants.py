@@ -654,26 +654,39 @@ def create_template(use_favorites):
     base = (app.activeDocument.name or 'variants').split(' v')[0]
     dlg.initialFilename = (re.sub(r'[^A-Za-z0-9_\- ]', '_', base).strip() or 'variants') + '_variants.csv'
     if dlg.showSave() != adsk.core.DialogResults.DialogOK:
-        return None, 0
+        return None, 0, 0
 
     path = dlg.filename
     if not path.lower().endswith('.csv'):
         path += '.csv'
 
-    header = ['Name'] + [p.name for p in params]
+    # One TRUE column per top-level component, so the on/off feature is
+    # visible without reading the docs. TRUE everywhere is exactly today's
+    # behaviour, so a generated template still builds an identical result.
+    # A component sharing a parameter's name is skipped: the parameter wins
+    # when the header is classified, so the column would never be read as a
+    # toggle.
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    param_names = set(p.name for p in params)
+    comp_names = [n for n in top_level_component_names(design)
+                  if n not in param_names]
+
+    header = ['Name'] + [p.name for p in params] + comp_names
     # One example row seeded with the model's current expressions, so the
     # expected "value + unit" format is obvious. Text parameters are written
     # without their surrounding quotes (so 'A-6' becomes A-6) to keep the sheet
     # tidy; the quotes are re-added automatically on import based on the model's
     # parameter type, so a value can even be a number used as engraving text.
-    example = ['Variant_1'] + [sheet_core.unquote_text(p.expression) for p in params]
+    example = (['Variant_1']
+               + [sheet_core.unquote_text(p.expression) for p in params]
+               + ['TRUE'] * len(comp_names))
 
     with open(path, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(header)
         writer.writerow(example)
 
-    return path, len(params)
+    return path, len(params), len(comp_names)
 
 
 # --------------------------------------------------------------------------- #
@@ -1065,13 +1078,14 @@ class TemplateExecuteHandler(adsk.core.CommandEventHandler):
         try:
             inputs = args.command.commandInputs
             use_favorites = inputs.itemById('source').selectedItem.name.startswith('Favorite')
-            path, n = create_template(use_favorites)
+            path, n, c = create_template(use_favorites)
             if path is None:
                 return  # user cancelled the save dialog
+            comp_note = (' and {} component on/off column(s)'.format(c)) if c else ''
             ui.messageBox(
-                'Template with {} parameter column(s) saved to:\n{}\n\n'
+                'Template with {} parameter column(s){} saved to:\n{}\n\n'
                 'In Google Sheets: File > Import > Upload, then fill in one row per variant. '
-                'Use the same link with "Build Variants Assembly".'.format(n, path))
+                'Use the same link with "Build Variants Assembly".'.format(n, comp_note, path))
         except Exception:
             if ui:
                 ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
