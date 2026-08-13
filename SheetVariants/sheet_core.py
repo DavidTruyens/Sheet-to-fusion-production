@@ -471,6 +471,10 @@ def validate_mapping(header, rows, known_param_names, driveable_param_names,
     rep.mapped_columns = len(cols["parameters"])
     rep.toggle_columns = len(cols["toggles"])
 
+    # Every unknown entry becomes an error, INCLUDING the empty string that a
+    # blank header contributes. That is deliberate: a column with data but no
+    # header errored before component columns existed and must keep erroring.
+    # Skipping empty names here would silently let it through.
     for name in cols["unknown"]:
         rep.errors.append(
             'Column "{}" matches no parameter or top-level component in the model.'

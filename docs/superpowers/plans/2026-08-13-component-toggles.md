@@ -35,6 +35,12 @@ Reason: a component can be nested under more than one parent, so naming a single
 
 Fusion component names are unique within a design, so an off name identifies exactly one component wherever it appears in the tree. The walk therefore checks the off-set at **every** depth, not only at depth 1. If `Drawer` sits both at the top level and nested inside `Carcass`, switching it off removes both — they are the same component.
 
+## Failure modes
+
+| Situation | Behaviour |
+|---|---|
+| Check is bypassed — a Sheets URL is pasted and OK is clicked without ever pressing **Load tabs** | Validation short-circuits to ok and the build runs. `build_exports` does not re-validate toggle cell values on this path, so a cell reading `maybe` keeps the component instead of erroring. The direction is fail-safe (an unwanted part is visible; a missing one is not), and the same hole already lets a comma-decimal parameter cell through — this is an inherited gate weakness with a new surface, not a regression introduced here. |
+
 ## File Structure
 
 | File | Responsibility | Change |

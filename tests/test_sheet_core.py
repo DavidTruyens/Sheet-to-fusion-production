@@ -542,6 +542,18 @@ def test_classify_columns_reports_a_blank_header():
     assert cols["toggles"] == []
 
 
+def test_validate_blank_header_column_still_errors():
+    # A column with values but no header must block the build. This preserves
+    # what the add-in did before component columns existed, and it is an
+    # explicit project decision — do not "simplify" the empty-name case out of
+    # validate_mapping's unknown-column loop without revisiting it.
+    header = ["Name", "diameter", ""]
+    rows = [["V1", "18 mm", "3"]]
+    rep = sheet_core.validate_mapping(header, rows, {"diameter"}, ["diameter"])
+    assert not rep.ok
+    assert any("matches no parameter" in e for e in rep.errors)
+
+
 def test_row_toggles_reads_each_column():
     result = sheet_core.row_toggles(
         ["Unit_S", "500 mm", "FALSE", "TRUE"],

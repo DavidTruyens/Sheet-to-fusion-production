@@ -121,7 +121,9 @@ component on or off for each variant, instead of setting a parameter:
   and Check warns about the collision.
 - Toggles apply to **every export profile**. A Named-components profile builds
   the components it lists *and* that the row keeps, so off wins. A variant left
-  with nothing to build is named in the run summary; the rest still build.
+  with nothing to build is named in the run summary; the rest still build —
+  unless every variant comes out empty, in which case the profile as a whole
+  is reported as skipped instead.
 
 The source model is never modified — the geometry is simply not collected for
 that variant.
