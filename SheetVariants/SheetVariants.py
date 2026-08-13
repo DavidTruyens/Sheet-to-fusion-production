@@ -667,9 +667,16 @@ def create_template(use_favorites):
     # when the header is classified, so the column would never be read as a
     # toggle.
     design = adsk.fusion.Design.cast(app.activeProduct)
-    param_names = set(p.name for p in params)
+    # Filter against EVERY parameter in the design, not just the ones becoming
+    # columns here. classify_columns resolves a name that is both a parameter
+    # and a component in favour of the parameter, and it is given
+    # known_param_names(design) — all parameters, favorites or not. A component
+    # sharing a non-favorite parameter's name would otherwise be written as a
+    # TRUE column, read back as a parameter column, and fail the build trying to
+    # set that parameter to "TRUE".
+    all_param_names = set(known_param_names(design))
     comp_names = [n for n in top_level_component_names(design)
-                  if n not in param_names]
+                  if n not in all_param_names]
 
     header = ['Name'] + [p.name for p in params] + comp_names
     # One example row seeded with the model's current expressions, so the
