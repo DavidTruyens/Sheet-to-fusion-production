@@ -9,6 +9,37 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
 - **Filter by thickness** — filter which variants or components are built/exported
   by their material thickness.
 
+## 1.17.0 — Update children
+
+- **Update Children** — one dialog listing every child in the layout, grouped
+  by its mother. Each mother's heading shows the version its children were
+  built from, and calls it out once that differs from the mother's current
+  version — **any** difference counts, including a mother reverted to an
+  older version, not just one that has moved forward. A box that has been
+  moved or resized since it was filled is flagged the same way. Out-of-date,
+  resized and moved children are pre-ticked; tick what you want rebuilt and
+  click OK.
+- A rebuild swaps geometry through the same in-place `updateBody()` path a
+  re-fill uses, so a feature added downstream of the generated geometry
+  survives for as long as what it references still exists after the change —
+  the same durability rule as re-running Fill Placeholders, not a stronger one.
+- Each mother is opened once for the whole run, and children sharing a mother,
+  config and size share one recompute rather than driving it separately.
+- Four kinds of child can't be helped by rebuilding, so they're shown but left
+  unticked: a mother that can't be found, a placeholder box that was deleted,
+  a box that has been **rotated**, and a child moved into a sub-assembly. A
+  rotated box needs its front face picked again, so it's sent back to **Fill
+  Placeholders**; a child in a sub-assembly has to be moved back to the top
+  level before either command can find it.
+- A problem opening or reading a mother fails every child under it; a problem
+  with one child's own drive step fails only that child. Either way, every
+  other mother's children still get their turn.
+- If a run can't restore every parameter it drove on a mother you already had
+  open, it warns you, names them, and tells you to close that mother
+  **without saving**.
+- Cancelling keeps whatever children were already rebuilt and reports the rest
+  as cancelled.
+
 ## 1.16.0 — One anchor rule
 
 - **The anchor always lands on the centre of the box's front face.** 1.15.0 asked

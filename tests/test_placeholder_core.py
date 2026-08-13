@@ -579,3 +579,168 @@ def test_mother_setup_no_longer_carries_an_anchor_rule():
 def test_child_recipe_no_longer_carries_an_anchor_rule():
     assert "anchorAt" not in pc.migrate_child_recipe({})
     assert "anchorAt" not in pc.migrate_child_recipe({"anchorAt": "centre"})
+
+
+# --- staleness, change detection and status labels --------------------------
+
+def test_staleness_compares_versions():
+    assert pc.staleness(12, 14) == pc.STALE_OUT_OF_DATE
+    assert pc.staleness(12, 12) == pc.STALE_CURRENT
+
+
+def test_staleness_flags_a_reverted_mother_too():
+    assert pc.staleness(14, 12) == pc.STALE_OUT_OF_DATE
+
+
+def test_staleness_is_unknown_without_both_versions():
+    assert pc.staleness(None, 12) == pc.STALE_UNKNOWN
+    assert pc.staleness(12, None) == pc.STALE_UNKNOWN
+    assert pc.staleness("12", 12) == pc.STALE_UNKNOWN
+
+
+def test_staleness_excludes_bool_from_either_side():
+    # bool is an int subclass, but a stored/current version of True or False is
+    # not a real version number — it must read as unknown, not as a match or a
+    # mismatch, on both sides of the comparison.
+    assert pc.staleness(True, 1) == pc.STALE_UNKNOWN
+    assert pc.staleness(1, True) == pc.STALE_UNKNOWN
+
+
+def test_frame_from_matrix_round_trips_occurrence_matrix():
+    frame = pc.target_frame((0.0, -1.0, 0.0))
+    m = pc.occurrence_matrix((3.0, 4.0, 5.0), frame)
+    assert pc.frame_from_matrix(m) == frame
+
+
+def test_frame_from_matrix_round_trips_a_rotated_frame():
+    import math as m
+    c = m.cos(m.pi / 4)
+    frame = pc.target_frame((c, -c, 0.0))
+    got = pc.frame_from_matrix(pc.occurrence_matrix((0.0, 0.0, 0.0), frame))
+    for axis, expected in zip(got, frame):
+        assert _close(axis, expected, 1e-12)
+
+
+def test_matrices_differ_detects_a_translation():
+    frame = pc.target_frame((0.0, -1.0, 0.0))
+    a = pc.occurrence_matrix((0.0, 0.0, 0.0), frame)
+    b = pc.occurrence_matrix((0.0, 20.0, 0.0), frame)
+    assert pc.matrices_differ(a, b)
+    assert not pc.matrices_differ(a, list(a))
+
+
+def test_matrices_differ_ignores_floating_point_noise():
+    frame = pc.target_frame((0.0, -1.0, 0.0))
+    a = pc.occurrence_matrix((1.0, 2.0, 3.0), frame)
+    b = [v + 1e-12 for v in a]
+    assert not pc.matrices_differ(a, b)
+
+
+def test_matrices_differ_on_missing_input():
+    assert pc.matrices_differ(None, [0.0] * 16)
+    assert pc.matrices_differ([0.0] * 16, [0.0] * 4)
+
+
+def test_is_axis_aligned_true_for_a_box_in_its_own_frame():
+    frame = pc.target_frame((0.0, -1.0, 0.0))
+    assert pc.is_axis_aligned(_box_vertices(0, 0, 0, 60, 58, 72), frame)
+
+
+def test_is_axis_aligned_false_for_a_rotated_box():
+    import math as m
+    c = m.cos(m.pi / 4)
+    verts = [(x * c - y * c, x * c + y * c, z)
+             for x, y, z in _box_vertices(-30, -29, 0, 30, 29, 72)]
+    assert not pc.is_axis_aligned(verts, pc.target_frame((0.0, -1.0, 0.0)))
+
+
+def test_is_axis_aligned_false_for_a_degenerate_box():
+    # Flat along the up axis: every vertex projects to the same value there, so
+    # there is only one distinct coordinate, not two. A check that only rejects
+    # MORE than two would wrongly call this aligned.
+    frame = pc.target_frame((0.0, -1.0, 0.0))
+    flat = _box_vertices(0, 0, 0, 60, 58, 0)
+    assert not pc.is_axis_aligned(flat, frame)
+
+
+def _stored(version=12, dims=(60.0, 58.0, 72.0)):
+    return pc.new_child_recipe(
+        slot_id="slot-abc",
+        mother={"fileId": "urn:x", "name": "m.f3d", "version": version},
+        config="C", sheet_url="", tab="", dims_cm=dims,
+        bodies=[], built_at="2026-08-08T00:00:00")
+
+
+def test_child_status_up_to_date_is_not_ticked():
+    s = pc.child_status(_stored(), 12, (60.0, 58.0, 72.0), False, False, True, True)
+    assert s["staleness"] == pc.STALE_CURRENT
+    assert s["tick"] is False
+    assert pc.status_label(s) == "up to date"
+
+
+def test_child_status_out_of_date_is_ticked():
+    s = pc.child_status(_stored(), 14, (60.0, 58.0, 72.0), False, False, True, True)
+    assert s["tick"] is True
+    assert pc.status_label(s) == "out of date"
+
+
+def test_child_status_detects_a_resize():
+    s = pc.child_status(_stored(), 12, (100.0, 58.0, 72.0), False, False, True, True)
+    assert s["resized"] is True
+    assert s["tick"] is True
+    assert "resized" in pc.status_label(s)
+
+
+def test_child_status_ignores_a_sub_micron_dimension_difference():
+    s = pc.child_status(_stored(), 12, (60.00000001, 58.0, 72.0),
+                        False, False, True, True)
+    assert s["resized"] is False
+
+
+def test_child_status_combines_flags_in_the_label():
+    s = pc.child_status(_stored(), 14, (100.0, 58.0, 72.0), True, False, True, True)
+    assert pc.status_label(s) == "out of date, resized, moved"
+
+
+def test_child_status_moved_alone_still_ticks():
+    # Version unchanged and dims unchanged — moved is the only reason to rebuild,
+    # so it alone must be enough to tick the row and to appear in the label.
+    s = pc.child_status(_stored(), 12, (60.0, 58.0, 72.0), True, False, True, True)
+    assert s["tick"] is True
+    assert pc.status_label(s) == "moved"
+
+
+def test_child_status_missing_mother_is_a_problem_and_not_ticked():
+    s = pc.child_status(_stored(), None, (60.0, 58.0, 72.0), False, False, False, True)
+    assert s["problem"] == "mother not found"
+    assert s["tick"] is False
+    assert pc.status_label(s) == "mother not found"
+
+
+def test_child_status_missing_mother_problem_matches_exported_constant():
+    # placeholder_cmds._mother_heading dispatches on PROBLEM_MOTHER_NOT_FOUND
+    # instead of a literal copy of this prose (see that constant's own
+    # docstring). Pin that child_status actually sets the exported constant's
+    # value, so rewording the message here cannot silently decouple from that
+    # caller without this test failing first.
+    s = pc.child_status(_stored(), None, (60.0, 58.0, 72.0), False, False, False, True)
+    assert s["problem"] == pc.PROBLEM_MOTHER_NOT_FOUND
+
+
+def test_child_status_missing_placeholder_is_a_problem():
+    s = pc.child_status(_stored(), 12, None, False, False, True, False)
+    assert s["problem"] == "placeholder missing"
+    assert s["tick"] is False
+
+
+def test_child_status_missing_mother_takes_precedence_over_missing_box():
+    # A child whose mother is gone cannot be rebuilt no matter what state its own
+    # box is in — the more fundamental failure must win the message.
+    s = pc.child_status(_stored(), None, None, False, False, False, False)
+    assert s["problem"] == "mother not found"
+
+
+def test_child_status_rotated_is_a_problem_not_a_rebuild():
+    s = pc.child_status(_stored(), 12, (60.0, 58.0, 72.0), False, True, True, True)
+    assert s["tick"] is False
+    assert "re-run Fill Placeholders" in pc.status_label(s)

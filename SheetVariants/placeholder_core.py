@@ -372,6 +372,127 @@ def resulting_body_names(old_names, new_names, ops):
     return survivors + adds
 
 
+STALE_UNKNOWN = "unknown"
+STALE_CURRENT = "up_to_date"
+STALE_OUT_OF_DATE = "out_of_date"
+
+# child_status()'s problem string for "this child's mother could not be
+# resolved at all" (deleted, or never known to this add-in). Exported so a
+# caller that needs to dispatch on it — placeholder_cmds._mother_heading does,
+# to word a dialog heading differently for a missing mother — can compare
+# against this constant instead of a literal copy of the prose, which
+# rebuild_child's own docstring calls out as exactly the coupling to avoid:
+# rewording the message here would otherwise silently break that caller.
+PROBLEM_MOTHER_NOT_FOUND = "mother not found"
+
+# A micron. Below this, a dimension difference is floating-point noise from
+# measuring the same box twice, not a resize the user made.
+_DIMS_TOLERANCE_CM = 1e-4
+
+
+def staleness(stored_version, current_version):
+    """Whether a child's mother has moved on since the child was built.
+
+    Any difference counts, not just an increase — reverting a mother to an older
+    version is still a change the children have not seen. A version that is not an
+    int (a mother that was never saved, or could not be resolved) is unknown rather
+    than stale, so a resolution failure never masquerades as an update. Both sides
+    go through ``_version``, which also excludes ``bool`` — the same reason it does
+    for a stored recipe applies just as much to a freshly-read current version."""
+    if _version(stored_version) is None or _version(current_version) is None:
+        return STALE_UNKNOWN
+    return STALE_OUT_OF_DATE if stored_version != current_version else STALE_CURRENT
+
+
+def frame_from_matrix(matrix16):
+    """The (width, depth, up) axes carried by a child's occurrence transform.
+
+    The front direction the user picked at fill time is not stored; it is recovered
+    from here. Exact for a box that moved or resized, since a box's centre is the
+    same measured in any frame — but not for one that was rotated, which
+    is_axis_aligned() detects separately."""
+    return ((matrix16[0], matrix16[4], matrix16[8]),
+            (matrix16[1], matrix16[5], matrix16[9]),
+            (matrix16[2], matrix16[6], matrix16[10]))
+
+
+def matrices_differ(a, b, tolerance=1e-6):
+    """Whether two row-major matrices describe different placements. Used to spot a
+    moved box without storing a placement, by comparing the child's live transform
+    against one freshly computed from its box."""
+    if not a or not b or len(a) != len(b):
+        return True
+    return any(abs(x - y) > tolerance for x, y in zip(a, b))
+
+
+def is_axis_aligned(vertices, frame, tolerance=1e-4):
+    """Whether these vertices form a box whose faces are parallel to ``frame``.
+
+    A box aligned to a frame projects onto exactly two distinct coordinates per
+    axis. More than two means the box has been rotated relative to the frame, so
+    measuring it there would report the wrong width and depth."""
+    for axis in frame:
+        values = sorted(dot(v, axis) for v in vertices)
+        distinct = [values[0]]
+        for value in values[1:]:
+            if value - distinct[-1] > tolerance:
+                distinct.append(value)
+        if len(distinct) != 2:
+            return False
+    return True
+
+
+def child_status(recipe, current_version, box_dims_cm, moved, rotated,
+                 mother_found, box_found):
+    """What the Update dialog should say about one child, and whether to tick it.
+
+    Problems (a missing mother, a deleted placeholder, a rotated box) are reported
+    and left unticked: none of them can be fixed by rebuilding, so pre-selecting
+    them would invite a run that cannot help.
+    """
+    status = {"staleness": STALE_UNKNOWN, "resized": False, "moved": False,
+              "rotated": False, "problem": "", "tick": False}
+    if not mother_found:
+        status["problem"] = PROBLEM_MOTHER_NOT_FOUND
+        return status
+    if not box_found:
+        status["problem"] = "placeholder missing"
+        return status
+    if rotated:
+        status["rotated"] = True
+        status["problem"] = "rotated — re-run Fill Placeholders"
+        return status
+
+    recipe = migrate_child_recipe(recipe)
+    status["staleness"] = staleness(recipe["mother"]["version"], current_version)
+    status["moved"] = bool(moved)
+    if box_dims_cm is not None:
+        stored = recipe["dims_cm"]
+        status["resized"] = any(
+            abs(measured - was) > _DIMS_TOLERANCE_CM
+            for measured, was in zip(box_dims_cm,
+                                     (stored["w"], stored["d"], stored["h"])))
+    status["tick"] = (status["staleness"] == STALE_OUT_OF_DATE
+                      or status["resized"] or status["moved"])
+    return status
+
+
+def status_label(status):
+    """The human-readable status shown in the dialog's last column."""
+    if status["problem"]:
+        return status["problem"]
+    parts = []
+    if status["staleness"] == STALE_OUT_OF_DATE:
+        parts.append("out of date")
+    if status["resized"]:
+        parts.append("resized")
+    if status["moved"]:
+        parts.append("moved")
+    if parts:
+        return ", ".join(parts)
+    return "unknown version" if status["staleness"] == STALE_UNKNOWN else "up to date"
+
+
 def resulting_snap_order(old_names, new_items, ops):
     """``new_items`` (parallel to the ``new_names`` passed into ``pair_bodies``)
     reordered into the PHYSICAL order ``ops`` leaves the real Fusion collection
