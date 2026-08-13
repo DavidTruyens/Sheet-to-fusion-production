@@ -41,13 +41,19 @@ at the same size.
 
 ## 1. The null test, with boxes inside a component
 
-> **Status: ⚠️ partial.** In the 1.17.0 run, untouched children read `out of date`
-> alone — no spurious `moved` or `resized` — which provisionally exonerates
-> `matrices_differ`'s 1e-6 tolerance. But the browser in that session shows the
-> boxes in the **root component's** `Bodies` folder, not inside a `Layout`
-> component. Native and world coordinates coincide at the root, so the
-> coordinate-space cause **was never exercised**. This item is not done: it needs
-> re-running with the boxes inside a component, which is what the README recommends.
+> **Status: ✅ pass, and both suspects are now cleared.** Re-run with the boxes
+> inside a layout component *and* a sub-component. Untouched children read
+> `up to date`; nothing spurious.
+>
+> **The coordinate-space cause is DISPROVEN** (spike 7). `attribute.parent` is
+> already a **proxy**, not a native body — `createForAssemblyContext` on it raises
+> `3 : object is not a native object`, and the flat-face normals read from it are
+> byte-identical to those read from `occurrence.bRepBodies`. So `find_slot_bodies`
+> was returning world coordinates all along, and this item's first branch
+> described a bug that does not exist. Struck off.
+>
+> `matrices_differ`'s 1e-6 tolerance is correspondingly exonerated: with the
+> space question settled, no false `moved` appeared in either configuration.
 
 **This is the diagnostic that matters most.** Change nothing at all. Run
 **Update Children**.
@@ -288,11 +294,18 @@ screenshot and asking why it said what it said.
 
 ## Known residuals — recorded, not hidden
 
-- **The native-vs-world coordinate space of the measured box is still untested.**
-  Item 1 ran with the boxes in the **root** component, where native and world
-  coincide, so the question it exists to answer went unasked. `matrices_differ`'s
-  1e-6 tolerance is provisionally exonerated — untouched children showed no false
-  `moved` — but only in that same configuration.
+- ~~The native-vs-world coordinate space of the measured box.~~ **Resolved by
+  spike 7: the bug did not exist.** `attribute.parent` hands back a proxy in world
+  context, so `find_slot_bodies` never had the problem this was written to
+  anticipate. `matrices_differ`'s 1e-6 tolerance is exonerated with it — no false
+  `moved` in either configuration. Both entries were carried as suspects from Plan
+  2's review, and both were wrong; the symptom that prompted them had a different
+  cause each time (a fillet, then a genuinely rotated box).
+- **Stale `slotId` attributes accumulate.** Spike 7 found 6 slot attributes for 3
+  live boxes: deleting a placeholder leaves its attribute behind with
+  `attribute.parent` of `None`. Harmless today — `find_slot_bodies` stores the
+  `None` and every caller guards on it, so the row reads `placeholder missing` —
+  but it is unbounded growth and the `None` is stored rather than skipped.
 - **Q4 is unmeasured:** which of an open document's version numbers tracks its own
   saves. Not a correctness risk — the stale-version guard fires only when the open
   version is genuinely *behind*, and both directions of lag are handled — but it
