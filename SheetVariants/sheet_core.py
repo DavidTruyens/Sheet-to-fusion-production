@@ -308,6 +308,34 @@ def classify_value(text):
     return "ok"
 
 
+TOGGLE_ON = ("true", "1", "yes", "y", "on")
+TOGGLE_OFF = ("false", "0", "no", "n", "off")
+
+
+def parse_toggle(text):
+    """Read a component on/off cell.
+
+    Returns True (component stays in), False (component is dropped for this
+    variant), or None for a value that is neither — which the caller must
+    report as an error rather than guess at. A blank cell returns True,
+    matching the existing rule that a blank parameter cell leaves things
+    unchanged; the alternative would make adding a column to a long sheet
+    mean editing every row.
+
+    None is deliberately distinct from False. A typo that silently meant
+    "off" would be invisible in the output, because a missing part looks
+    exactly like a part you meant to remove.
+    """
+    s = (text or "").strip().lower()
+    if s == "":
+        return True
+    if s in TOGGLE_ON:
+        return True
+    if s in TOGGLE_OFF:
+        return False
+    return None
+
+
 def _cell_ref(col_index, row_number):
     letters = ""
     n = col_index + 1

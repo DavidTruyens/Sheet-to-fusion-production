@@ -369,3 +369,28 @@ def test_validate_clean_sheet_summary():
     rep = sheet_core.validate_mapping(header, rows, {"diameter", "hoogte"}, ["diameter", "hoogte"])
     assert rep.ok
     assert "2 columns mapped" in rep.summary()
+
+
+def test_parse_toggle_on_words():
+    for text in ("TRUE", "true", " True ", "1", "yes", "Y", "on", "ON"):
+        assert sheet_core.parse_toggle(text) is True, text
+
+
+def test_parse_toggle_off_words():
+    for text in ("FALSE", "false", " False ", "0", "no", "N", "off", "OFF"):
+        assert sheet_core.parse_toggle(text) is False, text
+
+
+def test_parse_toggle_blank_keeps_the_component():
+    # A blank cell must mean "in", matching the existing rule that a blank
+    # parameter cell leaves that parameter unchanged.
+    assert sheet_core.parse_toggle("") is True
+    assert sheet_core.parse_toggle("   ") is True
+    assert sheet_core.parse_toggle(None) is True
+
+
+def test_parse_toggle_unrecognised_is_none():
+    # None is distinct from False: a typo must be reportable as an error
+    # rather than silently removing a component.
+    for text in ("maybe", "2", "-1", "true-ish", "aan"):
+        assert sheet_core.parse_toggle(text) is None, text
