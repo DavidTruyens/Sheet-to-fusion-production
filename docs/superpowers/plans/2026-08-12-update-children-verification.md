@@ -1,12 +1,36 @@
 # Update Children — manual verification checklist
 
-**Branch:** `update-children` (Plan 2) · **Version:** 1.17.0
+**Branch:** merged to `main` (PRs #21, #22) · **Version:** 1.17.2
 **Why this exists:** `adsk` only runs inside Fusion, so CI can never execute this
 feature's Fusion-side code. Every task was verified by *reading*. This is the only
 actual verification it gets.
 
 Ordered by value. **Items 1–3 decide whether the feature is trustworthy** — if 1 or
 2 fails, stop and report before doing the rest.
+
+## Status at 1.17.2
+
+| # | Item | Status |
+|---|------|--------|
+| 1 | Null test | ⚠️ **partial** — no false `moved`/`resized`, but boxes were at ROOT |
+| 2 | Two-mother run | ⬜ not run — only one mother in the test layout |
+| 3 | Core loop | ✅ **pass** |
+| 4 | Hand-made cut | ⬜ not run |
+| 5 | Move a box | ⬜ not run |
+| 6 | Resize a box | ⬜ not run |
+| 7 | Rotate a box | ✅ **pass** — and exposed a separate false positive, now fixed |
+| 8 | Deleted box / sub-assembly | ⬜ not run |
+| 9 | Isolation | ⬜ not run |
+| 10 | Mothers come back clean | ⬜ not run |
+| 11 | Session trust | ⬜ not run |
+| 12 | Cancel midway | ⬜ not run |
+| 13 | The dialog as an object | ⚠️ **partial** — three defects found and fixed |
+| 14 | Scale | ⬜ not run |
+
+**Four defects reached Fusion and were found by real use, not review** — all fixed
+in 1.17.1/1.17.2 and recorded under *What real use found* at the foot of this file.
+None were on this checklist, which is worth noticing: every item tests what the code
+was *designed* to do, and all four were things it was designed to do wrongly.
 
 **Set-up, once:** a layout filled from **two different mothers**, with the
 placeholder boxes **inside a `Layout` component** (as the README recommends), at
@@ -16,6 +40,14 @@ at the same size.
 ---
 
 ## 1. The null test, with boxes inside a component
+
+> **Status: ⚠️ partial.** In the 1.17.0 run, untouched children read `out of date`
+> alone — no spurious `moved` or `resized` — which provisionally exonerates
+> `matrices_differ`'s 1e-6 tolerance. But the browser in that session shows the
+> boxes in the **root component's** `Bodies` folder, not inside a `Layout`
+> component. Native and world coordinates coincide at the root, so the
+> coordinate-space cause **was never exercised**. This item is not done: it needs
+> re-running with the boxes inside a component, which is what the README recommends.
 
 **This is the diagnostic that matters most.** Change nothing at all. Run
 **Update Children**.
@@ -61,6 +93,16 @@ loudly if not), but the failure path itself has never executed.
 
 ## 3. The core loop
 
+> **Status: ✅ pass** (1.17.2). A parameter changed in the mother and saved; its
+> children read `out of date` under a heading naming the mother and the version
+> they were built from; OK rebuilt them with the new geometry.
+>
+> Two things this item was written to catch failed first, and are what 1.17.1 and
+> 1.17.2 fix: the comparison read a **stale** version (a mother saved to v18 read
+> as v17 — item 3's own FAIL note about the data panel and the open document
+> disagreeing was closer to the truth than it knew), and the heading was
+> **duplicated** for one mother.
+
 Change a parameter in mother A, **save** it, close it. Run **Update Children**.
 
 - **PASS** — only mother A's children read `out of date` and are ticked, under a
@@ -98,6 +140,16 @@ Say explicitly which of the three happened.
 - **FAIL** — no flag at all, or `rotated`.
 
 ## 7. Rotate a box 30° about Z
+
+> **Status: ✅ pass.** A genuinely rotated box read
+> `rotated — re-run Fill Placeholders`, checkbox disabled and unticked, while its
+> siblings were ticked.
+>
+> It also exposed a **false positive this item did not anticipate**: the same box
+> carried fillets, and a filleted box read `rotated` *whatever its orientation*.
+> Item 7's own remedy — re-run Fill Placeholders — could never have cleared it,
+> because the geometry was never the problem. Fixed in 1.17.2 by judging
+> orientation from flat faces. See *What real use found*.
 
 - **PASS** — reads `rotated — re-run Fill Placeholders`, checkbox **disabled**, not
   pre-selected.
@@ -163,6 +215,17 @@ Run an Update successfully. Then open that mother, make a **real edit**, leave i
 
 ## 13. The dialog as an object
 
+> **Status: ⚠️ partial.** The button is on the panel and the heading row spans the
+> table width — both pass. The two open questions this item raised were both
+> answered **FAIL**, and both are fixed in 1.17.2:
+>
+> - the status column *was* clipping (`rotated — re-run Fill Placeho`) — widened
+> - a mother with children at two versions did **not** give one heading per
+>   version; it gave two contradictory headings for the *same* version, because
+>   the heading was derived from one child's staleness
+>
+> Still to check: switching documents while the dialog is open.
+
 - **PASS** — the **Update Children** button is on the panel itself, not in the
   overflow `…` menu, after a fresh add-in load.
 - Switch documents while the dialog is open. **PASS:** nothing is rebuilt.
@@ -183,11 +246,58 @@ Run an Update successfully. Then open that mother, make a **real edit**, leave i
 
 ---
 
+## What real use found — none of it on this checklist
+
+Four defects reached Fusion. Each was found by using the feature, not by review and
+not by any item above, and each is fixed in 1.17.1/1.17.2.
+
+1. **Every row disabled: "mother not found".** `findFileById` refused a valid
+   lineage urn — including the id a document reported about *itself* — and a failed
+   lookup was reported as a *missing mother*, which greys out the row. The command
+   was unusable rather than merely uninformative. An open mother's version now
+   comes off its own `DataFile` with no service call, and an unresolvable version
+   reads `unknown version` on a row you can still tick. Later measurement (spike 6)
+   found the same lookup working, so the failure is **intermittent** — meaning the
+   real fix was never trusting the lookup, not making it succeed.
+
+2. **A fillet read as a rotation.** The check wanted exactly two distinct vertex
+   coordinates per axis; rounding a box's edges puts vertices at the tangent
+   points, giving four (`min`, `min+r`, `max-r`, `max`) on a box perfectly square
+   to its frame. Every filleted placeholder read `rotated` permanently. Orientation
+   is judged from **flat faces** now — a fillet adds none, a chamfer only adds
+   extra ones.
+
+3. **A saved mother read as the previous version.** A mother saved to v18 was read
+   as v17, because the `DataFile` lags the document it describes. An open mother's
+   version is now whichever of its two version numbers is further ahead.
+
+4. **One mother, two contradictory headings.** The heading came from a single
+   child's staleness, which `child_status` suppresses when it returns early for a
+   per-child problem — so a rotated child got `mother1 — v16` and its siblings
+   `mother1 — v16 is out of date`. Headings are keyed on the mother's **file id**
+   now, which also stops two same-named mothers merging and one mother recorded
+   under two names splitting. The name came from the *document* (`mother1 v16`)
+   rather than the file, so headings read as though the version were printed twice.
+
+**What this says about the checklist.** Every item above tests behaviour the code
+was designed to have. All four of these were behaviours it was designed to have
+*wrongly* — a false negative in a lookup, a geometric check with an unstated
+assumption, a stale read, and a display keyed on the wrong thing. A checklist
+written from the implementation cannot find those. They were caught by looking at a
+screenshot and asking why it said what it said.
+
 ## Known residuals — recorded, not hidden
 
-- **Two Important findings deliberately left unfixed** so item 1 can tell them
-  apart: the native-vs-world coordinate space of the measured box, and
-  `matrices_differ`'s 1e-6 tolerance. Both produce the identical symptom.
+- **The native-vs-world coordinate space of the measured box is still untested.**
+  Item 1 ran with the boxes in the **root** component, where native and world
+  coincide, so the question it exists to answer went unasked. `matrices_differ`'s
+  1e-6 tolerance is provisionally exonerated — untouched children showed no false
+  `moved` — but only in that same configuration.
+- **Q4 is unmeasured:** which of an open document's version numbers tracks its own
+  saves. Not a correctness risk — the stale-version guard fires only when the open
+  version is genuinely *behind*, and both directions of lag are handled — but it
+  decides whether that guard can extend to `Fill Placeholders`.
+  `spikes/SVSpike6VersionIds` asks it and now scans every open document.
 - **The multi-mother activation failure path has never executed.** The guard is
   new; item 2 can only fail to reproduce the problem, never prove it cannot happen.
 - **`Fill Placeholders` grants session trust on weaker evidence** than
