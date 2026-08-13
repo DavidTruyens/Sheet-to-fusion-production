@@ -24,6 +24,9 @@ parameters, so the column names always match.
   a selection rule: **Whole model** (every solid body, the classic behaviour) or
   **Named components** (only the ticked components from the source design). Profiles
   are saved to `settings.json` so they persist between runs.
+- **Component on/off columns** — a sheet column named after a top-level
+  component switches it off for individual variants, so one sheet can describe
+  a 500 mm unit with no drawer and a 900 mm unit with one.
 - **Tab picker for multi-tab sheets** — if the linked sheet has more than one
   tab, **Load tabs** lists them so you can pick the one with your variants. The
   choice is pinned per sheet and remembered next time you open that link.
@@ -95,6 +98,33 @@ parameter name in the model.
   and named model parameters both work.
 - Put **units** in the cells (`50 mm`, `30 deg`); the value is written into the
   parameter expression. Blank cells leave that parameter unchanged.
+
+### Switching components off per variant
+
+A column whose header is the name of a **top-level component** switches that
+component on or off for each variant, instead of setting a parameter:
+
+| Name    | length | Drawer | Back  |
+|---------|--------|--------|-------|
+| Unit_S  | 500 mm | FALSE  | TRUE  |
+| Unit_L  | 900 mm | TRUE   | TRUE  |
+
+- `TRUE`, `1`, `yes`, `y`, `on` keep the component; `FALSE`, `0`, `no`, `n`,
+  `off` drop it. Case does not matter, so a Google Sheets checkbox column
+  works as-is.
+- A **blank** cell keeps the component. Anything else is a Check error, so a
+  typo never quietly removes a part.
+- Switching a component off takes its **sub-components with it**.
+- Only **top-level** components can be switched — a column naming a
+  sub-component is reported as an error rather than ignored.
+- If a name is both a parameter and a component, it is read as a **parameter**
+  and Check warns about the collision.
+- Toggles apply to **every export profile**. A Named-components profile builds
+  the components it lists *and* that the row keeps, so off wins. A variant left
+  with nothing to build is named in the run summary; the rest still build.
+
+The source model is never modified — the geometry is simply not collected for
+that variant.
 
 A ready-to-use sample is in [`examples/variants_example.csv`](examples/variants_example.csv).
 
