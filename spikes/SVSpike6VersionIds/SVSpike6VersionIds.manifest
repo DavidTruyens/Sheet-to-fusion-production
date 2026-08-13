@@ -1,0 +1,10 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "script",
+    "author": "David Truyens",
+    "description": {
+        "": "Measure whether latestVersionNumber is lineage-wide on an old version's DataFile."
+    },
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}
