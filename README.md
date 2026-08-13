@@ -260,26 +260,27 @@ duplicate on top of it. Keep a filled child at the top level of the design.
 
 **5. Keep up with the mother.** When you improve a mother model and save it, run
 **Update Children** in the layout. It lists every child, grouped by its mother, with
-each mother's heading showing the version its children were built from — and calling
-it out once that differs from the mother's current version. That comparison is
-exact: **any** difference counts, including a mother that has been reverted to an
-older version, not just one that has moved on. A box that has been moved or resized
+each mother's heading naming the version its children were built from and, when that
+differs, the version the mother is on now. That comparison is exact: **any**
+difference counts, including a mother that has been reverted to an older version,
+not just one that has moved on. A box that has been moved or resized
 since it was filled is flagged the same way. Out-of-date, resized and moved children
 are pre-ticked; tick what you want rebuilt and click OK.
 
 ```text
 Update children
 
-  Base Cabinet — v12 is out of date
+  Base Cabinet — built from v12, now v14
     [x] B60_2drawer      Base_2drawer   out of date
     [x] B90_sink         Base_sink      out of date, resized
     [x] B60_corner       Base_2drawer   out of date, moved
+    [ ] B40_end          Base_2drawer   rotated — re-run Fill Placeholders
 
   Tall Unit — v3
-    [ ] TALL_60           Tall_oven      up to date
+    [ ] TALL_60          Tall_oven      up to date
 
-  Wall Unit — missing
-    [ ] W80                Wall_2door     mother not found
+  Shelf Unit — built from v2, current version unknown
+    [ ] SH_120           Shelf_open     unknown version
 ```
 
 Four kinds of child can't be helped by rebuilding, so they are shown but left
@@ -288,6 +289,10 @@ that has been **rotated**, and a child that has been moved into a sub-assembly. 
 rotated box needs its front face picked again, so it goes back to **Fill
 Placeholders**; a child in a sub-assembly has to be moved back to the top level of
 the design before either command can find it.
+
+A child whose mother's **current version can't be determined** is not one of those
+four. It stays rebuildable and its status reads `unknown version`: all that is
+missing is the comparison, not the mother. Tick it and it rebuilds like any other.
 
 A rebuild swaps geometry through the same in-place `updateBody()` path a re-fill
 uses (see step 4 above), so a feature you added downstream of the generated

@@ -125,11 +125,19 @@ def _version(value):
 
 
 def new_child_recipe(slot_id, mother, config, sheet_url, tab, dims_cm,
-                     bodies, built_at):
+                     bodies, built_at, version_id=""):
     """The record a child carries so it can be rebuilt later.
 
     ``built_at`` is supplied by the caller rather than generated here, so this
     module stays free of wall-clock dependencies and its tests stay deterministic.
+
+    ``version_id`` is a SECOND way to name the mother's file. The primary
+    ``mother.fileId`` is a lineage urn, and Fusion's findFileById has been
+    observed refusing one — raising "3 : file not found" for the id a document
+    reports about ITSELF, both offline and online. versionId names a specific
+    version instead, and a mother resolved through either form can report the
+    lineage's latest version, which is what staleness actually needs. Empty for
+    children built before this field existed; the lineage id still gets tried.
     """
     mother = mother if isinstance(mother, dict) else {}
     w, d, h = dims_cm
@@ -139,6 +147,7 @@ def new_child_recipe(slot_id, mother, config, sheet_url, tab, dims_cm,
         "mother": {"fileId": str(mother.get("fileId") or ""),
                    "name": str(mother.get("name") or ""),
                    "version": _version(mother.get("version"))},
+        "versionId": str(version_id or ""),
         "config": str(config or ""),
         "sheetUrl": str(sheet_url or ""),
         "tab": str(tab or ""),
@@ -166,7 +175,8 @@ def migrate_child_recipe(data):
         tab=data.get("tab"),
         dims_cm=(_float(dims.get("w")), _float(dims.get("d")), _float(dims.get("h"))),
         bodies=bodies,
-        built_at=data.get("builtAt"))
+        built_at=data.get("builtAt"),
+        version_id=data.get("versionId"))
 
 
 UP = (0.0, 0.0, 1.0)
@@ -425,19 +435,32 @@ def matrices_differ(a, b, tolerance=1e-6):
     return any(abs(x - y) > tolerance for x, y in zip(a, b))
 
 
-def is_axis_aligned(vertices, frame, tolerance=1e-4):
-    """Whether these vertices form a box whose faces are parallel to ``frame``.
+def is_axis_aligned(face_normals, frame, tolerance=1e-4):
+    """Whether a body's FLAT faces line up with ``frame``.
 
-    A box aligned to a frame projects onto exactly two distinct coordinates per
-    axis. More than two means the box has been rotated relative to the frame, so
-    measuring it there would report the wrong width and depth."""
+    Asks that every frame axis has at least one flat face facing along it. A box
+    rotated relative to the frame has no flat face facing the axes it was turned
+    about, so measuring its width and depth in that frame would report the
+    diagonal of the real box instead of the box.
+
+    Judged from faces, not vertices. An earlier version required exactly two
+    distinct vertex coordinates per axis, which a FILLET breaks: rounding the
+    edges puts vertices at the tangent points, so a perfectly aligned box reads
+    as four values per axis (min, min+r, max-r, max). Every filleted placeholder
+    was reported as rotated, permanently — and re-running Fill Placeholders could
+    not clear it, because the geometry never was the problem. Curved faces simply
+    are not flat faces, so they are passed over rather than misread.
+
+    Only parallelism is tested, via the absolute dot product, so which way a
+    face's normal points does not matter — which is just as well, since whether
+    Fusion hands back an outward normal is not something this code knows.
+
+    A degenerate body still fails: a zero-thickness sheet has flat faces facing
+    one axis only, leaving the other two uncovered.
+    """
     for axis in frame:
-        values = sorted(dot(v, axis) for v in vertices)
-        distinct = [values[0]]
-        for value in values[1:]:
-            if value - distinct[-1] > tolerance:
-                distinct.append(value)
-        if len(distinct) != 2:
+        if not any(abs(abs(dot(normal, axis)) - 1.0) <= tolerance
+                   for normal in face_normals):
             return False
     return True
 
@@ -475,6 +498,112 @@ def child_status(recipe, current_version, box_dims_cm, moved, rotated,
     status["tick"] = (status["staleness"] == STALE_OUT_OF_DATE
                       or status["resized"] or status["moved"])
     return status
+
+
+def mother_heading(name, stored_version, current_version, found=True):
+    """The bold group heading above one mother's children.
+
+    Deliberately takes only facts about the MOTHER. It used to be derived from
+    a row's ``status["staleness"]``, which child_status leaves at STALE_UNKNOWN
+    whenever it returns early for a per-child problem — so a rotated child and
+    its siblings produced two different headings for the same mother at the same
+    version, one claiming out-of-date and one not, and the dialog re-emitted the
+    heading mid-group. A child's own trouble cannot change which version its
+    mother is on, so it cannot reach this text.
+
+    Both versions are named when they differ: "v16 is out of date" left the
+    reader nothing to compare against.
+    """
+    name = name or "(unnamed)"
+    if not found:
+        return "{} — missing".format(name)
+    if staleness(stored_version, current_version) == STALE_CURRENT:
+        return "{} — {}".format(name, _version_text(stored_version))
+    built = ("built from {}".format(_version_text(stored_version))
+             if stored_version is not None else "built from an unknown version")
+    now = ("now {}".format(_version_text(current_version))
+           if current_version is not None else "current version unknown")
+    return "{} — {}, {}".format(name, built, now)
+
+
+def _version_sort_key(version):
+    """Order versions numerically with an unresolved one sorting last. None must
+    never be compared directly against an int — that raises TypeError."""
+    return (version is None, version if version is not None else 0)
+
+
+def mother_heading_key(row):
+    """The identity of a heading GROUP. Rows sharing this key belong under one
+    heading, and the dialog emits a new heading exactly when it changes.
+
+    The key holds EVERY input to the heading text, so "same key implies same
+    text" is true by construction rather than by argument — and because
+    mother_sort_key sorts on this key, each group is contiguous by construction
+    too. Both were false when the key omitted the display name: the name leads
+    the ordering, so two children of one unresolvable mother recorded under
+    different names ("mother1" and the pre-fix "mother1 v16") could be separated
+    by a third mother sorting between them, splitting one group in two and
+    emitting a contradictory heading for each half.
+
+    The display name leads, so groups read alphabetically. The fileId follows it,
+    so two distinct files sharing a name stay separate groups rather than merging
+    as though they were one model.
+
+    The stored version is in the key because one mother legitimately has children
+    built from different versions — fill six boxes, save, fill three more — and
+    those are genuinely separate groups. Both versions drop out when the mother is
+    MISSING, because mother_heading's missing branch ignores them: keeping them
+    would emit several textually identical "— missing" headings in a row.
+    """
+    recipe = row["recipe"]
+    missing = row["status"]["problem"] == PROBLEM_MOTHER_NOT_FOUND
+    # _version_sort_key on both, including the dropped case, so every key element
+    # has one type — a bare None here would raise TypeError against a tuple when
+    # mother_sort_key compares two rows.
+    return (mother_display_name(row),
+            recipe["mother"]["fileId"],
+            missing,
+            _version_sort_key(None if missing else recipe["mother"]["version"]),
+            _version_sort_key(None if missing else row.get("current_version")))
+
+
+def mother_display_name(row):
+    """The name to show for this row's mother: the one resolved from the file
+    itself where that was possible, falling back to whatever the recipe recorded.
+
+    The resolved name heals a stale record without needing a rebuild — a child
+    that stored the document name "mother1 v16" still displays as "mother1".
+    """
+    return row.get("mother_name") or row["recipe"]["mother"]["name"]
+
+
+def mother_heading_for_row(row):
+    """The heading text for a row. Deliberately does NOT read the row's own
+    staleness: child_status leaves that at STALE_UNKNOWN whenever it returns
+    early for a per-child problem, so a rotated child and its siblings used to
+    render two contradictory headings for the same mother at the same version."""
+    return mother_heading(
+        mother_display_name(row),
+        row["recipe"]["mother"]["version"],
+        row.get("current_version"),
+        found=row["status"]["problem"] != PROBLEM_MOTHER_NOT_FOUND)
+
+
+def mother_sort_key(row):
+    """Order rows so that every heading group is contiguous AND groups read in a
+    human order.
+
+    Sorting on the heading key itself is what makes contiguity structural: any
+    other leading term could interleave two rows that share a key. The key starts
+    with the display name, so the alphabetical ordering comes for free.
+    """
+    return (mother_heading_key(row), row["name"])
+
+
+def _version_text(version):
+    """'vN', or an honest phrase rather than the literal 'vNone' that a bare
+    '{}'.format(None) would produce for a version that was never resolved."""
+    return "v{}".format(version) if version is not None else "an unknown version"
 
 
 def status_label(status):
