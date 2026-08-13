@@ -1,0 +1,10 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "script",
+    "author": "David Truyens",
+    "description": {
+        "": "Diagnose why Update Children reports 'mother not found' for a mother that is open."
+    },
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}
