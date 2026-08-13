@@ -240,17 +240,30 @@ def _occurrence_solid_bodies(occ, off):
     identifies one component wherever it sits in the tree; the check is applied
     at every depth rather than only at the top, which keeps the answer the same
     whether a component is placed at the root or nested.
+
+    Every read is guarded and materialised before use. Walking the tree in
+    Python rather than letting allOccurrences flatten it means one unreadable
+    occurrence would otherwise abort the whole collection; here it costs only
+    itself, matching how snapshot_bodies skips a body it cannot copy rather
+    than failing the run.
     """
     try:
         name = occ.component.name
     except Exception:
         name = ''
-    if name in off:
+    if name and name in off:
         return
-    for b in occ.bRepBodies:
-        if b.isSolid:
-            yield b
-    for child in occ.childOccurrences:
+    try:
+        bodies = [b for b in occ.bRepBodies if b.isSolid]
+    except Exception:
+        bodies = []
+    for b in bodies:
+        yield b
+    try:
+        children = list(occ.childOccurrences)
+    except Exception:
+        children = []
+    for child in children:
         for b in _occurrence_solid_bodies(child, off):
             yield b
 
@@ -270,10 +283,17 @@ def iter_solid_bodies(design, off_names=()):
     """
     off = set(off_names or ())
     root = design.rootComponent
-    for b in root.bRepBodies:
-        if b.isSolid:
-            yield b
-    for occ in root.occurrences:
+    try:
+        root_bodies = [b for b in root.bRepBodies if b.isSolid]
+    except Exception:
+        root_bodies = []
+    for b in root_bodies:
+        yield b
+    try:
+        occurrences = list(root.occurrences)
+    except Exception:
+        occurrences = []
+    for occ in occurrences:
         for b in _occurrence_solid_bodies(occ, off):
             yield b
 
@@ -319,10 +339,10 @@ def _component_solid_bodies(design, included_names, off_names=()):
     """Solid bodies of the selected components — one representative occurrence
     per component name, so a part exports once rather than once per instance.
 
-    Uses the same pruning walk as iter_solid_bodies, which is what makes a
-    variant's toggles win over a profile's include list: a profile naming a
-    sub-component of a switched-off component finds nothing, because the walk
-    never descends into it.
+    Prunes the same way iter_solid_bodies does — the off-set is checked at every
+    depth — which is what makes a variant's toggles win over a profile's include
+    list: a profile naming a sub-component of a switched-off component finds
+    nothing, because the walk never descends into it.
     """
     off = set(off_names or ())
     wanted = set(included_names)
@@ -332,17 +352,29 @@ def _component_solid_bodies(design, included_names, off_names=()):
         try:
             cname = occ.component.name
         except Exception:
-            return
-        if cname in off:
-            return                       # prune this component and its subtree
-        if cname in wanted and cname not in got:
-            bodies = [b for b in occ.bRepBodies if b.isSolid]
+            cname = ''       # unreadable: cannot match or be pruned, but its
+                             # children may still hold a wanted component
+        if cname and cname in off:
+            return           # prune this component and its subtree
+        if cname and cname in wanted and cname not in got:
+            try:
+                bodies = [b for b in occ.bRepBodies if b.isSolid]
+            except Exception:
+                bodies = []
             if bodies:
                 got[cname] = bodies
-        for child in occ.childOccurrences:
+        try:
+            children = list(occ.childOccurrences)
+        except Exception:
+            children = []
+        for child in children:
             visit(child)
 
-    for occ in design.rootComponent.occurrences:
+    try:
+        occurrences = list(design.rootComponent.occurrences)
+    except Exception:
+        occurrences = []
+    for occ in occurrences:
         visit(occ)
 
     out = []
