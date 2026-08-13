@@ -364,6 +364,10 @@ def classify_columns(header, param_names, top_level_names, all_component_names=(
             continue                      # column A is the variant name
         name = (raw or "").strip()
         if not name:
+            # A column with data but no header is reported, not skipped. Today's
+            # validate_mapping errors on it, and a column you filled in that
+            # quietly does nothing is invisible in the output.
+            out["unknown"].append(name)
             continue
         if name in params:
             out["parameters"].append((index, name))

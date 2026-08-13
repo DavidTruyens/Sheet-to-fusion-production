@@ -458,3 +458,16 @@ def test_classify_columns_with_no_components_matches_todays_behaviour():
     assert cols["parameters"] == [(1, "length")]
     assert cols["unknown"] == ["bogus"]
     assert cols["toggles"] == []
+
+
+def test_classify_columns_reports_a_blank_header():
+    # A column with values but no header must not vanish: today's
+    # validate_mapping errors on it, and a column that quietly does nothing
+    # is invisible in the built output.
+    cols = sheet_core.classify_columns(
+        ["Name", "length", "", "   "],
+        param_names={"length"},
+        top_level_names=["Drawer"])
+    assert cols["parameters"] == [(1, "length")]
+    assert cols["unknown"] == ["", ""]
+    assert cols["toggles"] == []
