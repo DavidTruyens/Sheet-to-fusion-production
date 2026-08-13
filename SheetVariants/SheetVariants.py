@@ -407,16 +407,26 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
     header = [h.strip() for h in rows[0]]
     if not header or not header[0]:
         raise RuntimeError('The first header cell must be "Name".')
-    param_names = header[1:]
-
     src_design = adsk.fusion.Design.cast(app.activeProduct)
     if not src_design:
         raise RuntimeError('Open the parametric source model as the active design before running this command.')
 
-    all_params = src_design.allParameters
-    missing = [p for p in param_names if not all_params.itemByName(p)]
-    if missing:
-        raise RuntimeError('These columns do not match any parameter in the model: ' + ', '.join(missing))
+    # Classify the header against the model once: parameter columns get
+    # applied, component columns switch parts off per row. Only headers that
+    # match neither are fatal — a toggle column is not a missing parameter.
+    cols = sheet_core.classify_columns(
+        header, known_param_names(src_design),
+        top_level_component_names(src_design), component_names(src_design))
+    param_columns = cols['parameters']
+    toggle_columns = cols['toggles']
+    param_names = [name for _, name in param_columns]
+
+    if cols['unknown']:
+        raise RuntimeError('These columns do not match any parameter or top-level '
+                           'component in the model: ' + ', '.join(cols['unknown']))
+    if cols['sub_components']:
+        raise RuntimeError('These columns name sub-components, which cannot be '
+                           'switched on or off: ' + ', '.join(cols['sub_components']))
 
     enabled = [p for p in profiles if p.get('enabled')]
     if not enabled:
@@ -473,7 +483,7 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 # driving dimension recomputes the model, which can invalidate the
                 # parameter collection (see build_engine._design()'s docstring).
                 values = {}
-                for col, pname in enumerate(param_names, start=1):
+                for col, pname in param_columns:
                     if col < len(row):
                         val = row[col].strip()
                         if val:
@@ -481,13 +491,21 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 build_engine.apply_values(values)
                 adsk.doEvents()  # recompute the source with this variant's values
 
+                # Components this row switches off. Purely a read of the sheet —
+                # the source model is never modified, the bodies are simply not
+                # collected below.
+                toggles = sheet_core.row_toggles(row, toggle_columns)
+                off_names = [name for name, keep in toggles.items() if not keep]
+
                 design = adsk.fusion.Design.cast(app.activeProduct)  # fresh after recompute
                 for ctx in active:
                     resolver = RESOLVERS[ctx['profile']['rule']]
-                    src_bodies, _warn = resolver(design, ctx['profile'])
+                    src_bodies, _warn = resolver(design, ctx['profile'], off_names)
                     snaps = build_engine.snapshot_bodies(src_bodies)
                     if snaps:
                         ctx.setdefault('variants', []).append((safe_name, snaps))
+                    else:
+                        ctx.setdefault('skipped_variants', []).append(safe_name)
                 progress.progressValue = i + 1
         finally:
             # Restore the source model — re-derive fresh per parameter, since each
