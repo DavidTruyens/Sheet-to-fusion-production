@@ -9,6 +9,34 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
 - **Filter by thickness** — filter which variants or components are built/exported
   by their material thickness.
 
+## 1.18.0 — Component on/off columns
+
+- **Component on/off columns** — a sheet column whose header names a
+  **top-level component** switches that component off for individual variant
+  rows: `TRUE`/`FALSE` (also `1`/`0`, `yes`/`no`, `y`/`n`, `on`/`off`,
+  case-insensitive). A **blank** cell leaves the component in, matching the
+  existing rule for a blank parameter cell; anything unrecognised is a Check
+  error, so a typo never quietly drops a part.
+- Switching a component off takes everything nested under it with it. Only
+  top-level components can be switched — a column naming a sub-component is a
+  Check error rather than being silently ignored.
+- Toggles apply to **every export profile**, off winning over a profile's
+  Named-components include list: a profile listing a sub-component of an
+  off component gets nothing for that row.
+- A variant left with nothing to build for a profile is named in that
+  profile's line of the run summary and skipped; the profile's other variants
+  still build. If *every* variant in a profile comes out empty, the profile
+  as a whole is reported as skipped instead, through the existing "no solid
+  bodies matched" path.
+- **Create Variant Sheet Template** now seeds one `TRUE` column per top-level
+  component alongside the parameter columns, so the feature is discoverable
+  without reading the README.
+- The source model is never modified by any of this — a switched-off
+  component's bodies are simply not collected when the variant is snapshotted.
+- **Known gap:** the Test tab preview does **not** yet honour toggles.
+  Previewing a row still shows every component regardless of its `FALSE`
+  cells; only the preview is wrong — a build itself applies toggles correctly.
+
 ## 1.17.2 — Update Children fixes from first real use
 
 - **A fillet on a placeholder box is no longer mistaken for a rotation.** The

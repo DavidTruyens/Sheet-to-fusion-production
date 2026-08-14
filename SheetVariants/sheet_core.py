@@ -156,7 +156,15 @@ def summarize_results(results):
     if built:
         lines.append("Built:")
         for r in built:
-            warn = (" — " + "; ".join(r["warnings"])) if r.get("warnings") else ""
+            # Variants dropped by their component toggles are reported, never
+            # silent: a variant missing from an output design with no
+            # explanation reads as a bug in the add-in.
+            notes = list(r.get("warnings") or [])
+            dropped = r.get("skipped_variants") or []
+            if dropped:
+                notes.append("{} variant(s) had nothing to build: {}".format(
+                    len(dropped), ", ".join(dropped)))
+            warn = (" — " + "; ".join(notes)) if notes else ""
             lines.append("  • {} ({} variant(s)){}".format(r.get("name", "Export"),
                                                            r.get("built", 0), warn))
     skipped = [r for r in results if r.get("skipped")]
@@ -308,6 +316,103 @@ def classify_value(text):
     return "ok"
 
 
+TOGGLE_ON = ("true", "1", "yes", "y", "on")
+TOGGLE_OFF = ("false", "0", "no", "n", "off")
+
+
+def parse_toggle(text):
+    """Read a component on/off cell.
+
+    Returns True (component stays in), False (component is dropped for this
+    variant), or None for a value that is neither — which the caller must
+    report as an error rather than guess at. A blank cell returns True,
+    matching the existing rule that a blank parameter cell leaves things
+    unchanged; the alternative would make adding a column to a long sheet
+    mean editing every row.
+
+    None is deliberately distinct from False. A typo that silently meant
+    "off" would be invisible in the output, because a missing part looks
+    exactly like a part you meant to remove.
+    """
+    s = (text or "").strip().lower()
+    if s == "":
+        return True
+    if s in TOGGLE_ON:
+        return True
+    if s in TOGGLE_OFF:
+        return False
+    return None
+
+
+def classify_columns(header, param_names, top_level_names, all_component_names=()):
+    """Decide what each header column after "Name" means, against the model.
+
+    A header is a parameter column, a component on/off column, or a problem.
+    Precedence is deliberate: a name that is BOTH a parameter and a top-level
+    component is read as a parameter, so no sheet that worked before this
+    feature can change meaning. The collision is reported so the designer is
+    not left guessing which way it went.
+
+    A header naming a component that exists but is not top-level is separated
+    from a header naming nothing at all, because they need different advice:
+    one is "this cannot be switched off", the other is "this is a typo".
+
+    Column indices are into the ROW, so column A ("Name") is 0 and the first
+    header after it is 1. That is what row_toggles and the build loop index
+    with, so no caller has to remember an offset.
+    """
+    params = set(param_names or ())
+    top_level = set(top_level_names or ())
+    all_components = set(all_component_names or ()) | top_level
+
+    out = {"parameters": [], "toggles": [], "unknown": [],
+           "sub_components": [], "collisions": []}
+    for index, raw in enumerate(header or []):
+        if index == 0:
+            continue                      # column A is the variant name
+        name = (raw or "").strip()
+        if not name:
+            # A column with data but no header is reported, not skipped. Today's
+            # validate_mapping errors on it, and a column you filled in that
+            # quietly does nothing is invisible in the output.
+            out["unknown"].append(name)
+            continue
+        if name in params:
+            out["parameters"].append((index, name))
+            if name in top_level:
+                out["collisions"].append(name)
+        elif name in top_level:
+            out["toggles"].append((index, name))
+        elif name in all_components:
+            out["sub_components"].append(name)
+        else:
+            out["unknown"].append(name)
+    return out
+
+
+def row_toggles(row, toggle_columns):
+    """{component name: is it in} for one variant row.
+
+    A cell the row does not reach is treated as blank (component stays in):
+    a spreadsheet often omits trailing empty cells entirely, and the parameter
+    path already treats a short row the same way.
+
+    An unrecognised value also keeps the component. validate_mapping blocks
+    the build before a build can ever see one, so this is a defensive default
+    rather than a rule — and it fails toward the recoverable direction, since
+    an unwanted part is visible in the output while a missing one is not.
+
+    Keyed by component name, so if the same component is named by two columns
+    the rightmost wins.
+    """
+    out = {}
+    for index, name in toggle_columns or []:
+        raw = row[index] if index < len(row) else ""
+        value = parse_toggle(raw)
+        out[name] = True if value is None else value
+    return out
+
+
 def _cell_ref(col_index, row_number):
     letters = ""
     n = col_index + 1
@@ -322,6 +427,7 @@ class ValidationReport:
         self.errors = []
         self.warnings = []
         self.mapped_columns = 0
+        self.toggle_columns = 0
         self.row_count = 0
 
     @property
@@ -329,12 +435,15 @@ class ValidationReport:
         return not self.errors
 
     def summary(self):
+        # The on/off clause is omitted entirely when there are none, so a
+        # sheet with no toggle columns produces the exact string it always did.
+        toggles = ", {} on/off".format(self.toggle_columns) if self.toggle_columns else ""
         if self.ok and not self.warnings:
-            return "✓ {} columns mapped, {} rows OK".format(
-                self.mapped_columns, self.row_count)
+            return "✓ {} columns mapped{}, {} rows OK".format(
+                self.mapped_columns, toggles, self.row_count)
         if self.ok:
-            return "✓ {} columns mapped, {} rows — {} warning(s)".format(
-                self.mapped_columns, self.row_count, len(self.warnings))
+            return "✓ {} columns mapped{}, {} rows — {} warning(s)".format(
+                self.mapped_columns, toggles, self.row_count, len(self.warnings))
         return "✗ {} error(s), {} warning(s) — fix before building".format(
             len(self.errors), len(self.warnings))
 
@@ -347,7 +456,8 @@ class ValidationReport:
         return "<br/>".join(lines)
 
 
-def validate_mapping(header, rows, known_param_names, driveable_param_names):
+def validate_mapping(header, rows, known_param_names, driveable_param_names,
+                     top_level_names=(), all_component_names=()):
     rep = ValidationReport()
     rep.row_count = len(rows)
     header = [h.strip() for h in header]
@@ -356,24 +466,38 @@ def validate_mapping(header, rows, known_param_names, driveable_param_names):
         rep.errors.append('The first column header must be "Name".')
         return rep
 
-    columns = header[1:]
-    known = set(known_param_names)
-    for name in columns:
-        if name in known:
-            rep.mapped_columns += 1
-        else:
-            rep.errors.append('Column "{}" matches no parameter in the model.'.format(name))
+    cols = classify_columns(header, known_param_names, top_level_names,
+                            all_component_names)
+    rep.mapped_columns = len(cols["parameters"])
+    rep.toggle_columns = len(cols["toggles"])
 
-    covered = set(columns)
+    # Every unknown entry becomes an error, INCLUDING the empty string that a
+    # blank header contributes. That is deliberate: a column with data but no
+    # header errored before component columns existed and must keep erroring.
+    # Skipping empty names here would silently let it through.
+    for name in cols["unknown"]:
+        rep.errors.append(
+            'Column "{}" matches no parameter or top-level component in the model.'
+            .format(name))
+    for name in cols["sub_components"]:
+        rep.errors.append(
+            'Column "{}" is a sub-component — only top-level components can be '
+            'switched on or off.'.format(name))
+    for name in cols["collisions"]:
+        rep.warnings.append(
+            'Column "{}" is both a parameter and a component — read as a parameter.'
+            .format(name))
+
+    covered = set(name for _, name in cols["parameters"])
     for pname in driveable_param_names:
         if pname not in covered:
-            rep.warnings.append('Parameter "{}" has no column — keeps its current value.'.format(pname))
+            rep.warnings.append(
+                'Parameter "{}" has no column — keeps its current value.'.format(pname))
 
     empty_count = 0
+    blank_toggles = 0
     for ri, row in enumerate(rows, start=2):  # row 2 = first data row in the sheet
-        for ci, name in enumerate(columns, start=1):
-            if name not in known:
-                continue
+        for ci, name in cols["parameters"]:
             val = row[ci] if ci < len(row) else ""
             kind = classify_value(val)
             if kind == "comma_decimal":
@@ -382,8 +506,19 @@ def validate_mapping(header, rows, known_param_names, driveable_param_names):
                     .format(_cell_ref(ci, ri), val.strip()))
             elif kind == "empty":
                 empty_count += 1
+        for ci, name in cols["toggles"]:
+            val = row[ci] if ci < len(row) else ""
+            if not (val or "").strip():
+                blank_toggles += 1
+            elif parse_toggle(val) is None:
+                rep.errors.append(
+                    'Cell {} ("{}") is not a yes/no value — use TRUE or FALSE.'
+                    .format(_cell_ref(ci, ri), val.strip()))
     if empty_count:
         rep.warnings.append("{} empty cell(s) left unchanged.".format(empty_count))
+    if blank_toggles:
+        rep.warnings.append(
+            "{} blank on/off cell(s) — those components stay in.".format(blank_toggles))
     return rep
 
 

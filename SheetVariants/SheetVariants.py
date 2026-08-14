@@ -232,17 +232,70 @@ def save_design_url(design, url):
 # --------------------------------------------------------------------------- #
 # Core work.
 # --------------------------------------------------------------------------- #
-def iter_solid_bodies(design):
-    """Yield every solid BRepBody in the design (root plus all occurrences),
-    as proxies positioned in their assembly-context (world) location."""
-    root = design.rootComponent
-    for b in root.bRepBodies:
-        if b.isSolid:
+def _occurrence_solid_bodies(occ, off):
+    """Solid bodies of an occurrence and its descendants, pruning any component
+    in ``off`` along with everything beneath it.
+
+    Component names are unique within a Fusion design, so a name in ``off``
+    identifies one component wherever it sits in the tree; the check is applied
+    at every depth rather than only at the top, which keeps the answer the same
+    whether a component is placed at the root or nested.
+
+    Every read is guarded and materialised before use. Walking the tree in
+    Python rather than letting allOccurrences flatten it means one unreadable
+    occurrence would otherwise abort the whole collection; here it costs only
+    itself, matching how snapshot_bodies skips a body it cannot copy rather
+    than failing the run.
+    """
+    try:
+        name = occ.component.name
+    except Exception:
+        name = ''
+    if name and name in off:
+        return
+    try:
+        bodies = [b for b in occ.bRepBodies if b.isSolid]
+    except Exception:
+        bodies = []
+    for b in bodies:
+        yield b
+    try:
+        children = list(occ.childOccurrences)
+    except Exception:
+        children = []
+    for child in children:
+        for b in _occurrence_solid_bodies(child, off):
             yield b
-    for occ in root.allOccurrences:
-        for b in occ.bRepBodies:
-            if b.isSolid:
-                yield b
+
+
+def iter_solid_bodies(design, off_names=()):
+    """Yield every solid BRepBody in the design, as proxies positioned in their
+    assembly-context (world) location, skipping components switched off for
+    this variant.
+
+    Walks down from root.occurrences rather than flattening with
+    allOccurrences, so an off component can take its whole subtree with it.
+    Filtering a flat list afterwards would mean comparing body proxies for
+    identity, which this avoids entirely.
+
+    Bodies owned by the root component itself belong to no occurrence, so no
+    column can address them; they are always included.
+    """
+    off = set(off_names or ())
+    root = design.rootComponent
+    try:
+        root_bodies = [b for b in root.bRepBodies if b.isSolid]
+    except Exception:
+        root_bodies = []
+    for b in root_bodies:
+        yield b
+    try:
+        occurrences = list(root.occurrences)
+    except Exception:
+        occurrences = []
+    for occ in occurrences:
+        for b in _occurrence_solid_bodies(occ, off):
+            yield b
 
 
 def component_names(design):
@@ -259,38 +312,84 @@ def component_names(design):
     return names
 
 
-def resolve_whole_model(design, profile):
-    """Every solid body in the design (root plus all occurrences)."""
-    return list(iter_solid_bodies(design)), []
+def top_level_component_names(design):
+    """Distinct component names among the root's DIRECT children, in order of
+    first appearance. These are the only components a sheet column can switch
+    off — deliberately narrower than component_names(), which reaches every
+    depth and backs the export-profile picker."""
+    names, seen = [], set()
+    for occ in design.rootComponent.occurrences:
+        try:
+            n = occ.component.name
+        except Exception:
+            continue
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+    return names
 
 
-def _component_solid_bodies(design, included_names):
+def resolve_whole_model(design, profile, off_names=()):
+    """Every solid body in the design, minus components switched off for this
+    variant."""
+    return list(iter_solid_bodies(design, off_names)), []
+
+
+def _component_solid_bodies(design, included_names, off_names=()):
     """Solid bodies of the selected components — one representative occurrence
-    per component name, so a part exports once rather than once per instance."""
+    per component name, so a part exports once rather than once per instance.
+
+    Prunes the same way iter_solid_bodies does — the off-set is checked at every
+    depth — which is what makes a variant's toggles win over a profile's include
+    list: a profile naming a sub-component of a switched-off component finds
+    nothing, because the walk never descends into it.
+    """
+    off = set(off_names or ())
     wanted = set(included_names)
     got = {}
-    for occ in design.rootComponent.allOccurrences:
+
+    def visit(occ):
         try:
             cname = occ.component.name
         except Exception:
-            continue
-        if cname in wanted and cname not in got:
-            bodies = [b for b in occ.bRepBodies if b.isSolid]
+            cname = ''       # unreadable: cannot match or be pruned, but its
+                             # children may still hold a wanted component
+        if cname and cname in off:
+            return           # prune this component and its subtree
+        if cname and cname in wanted and cname not in got:
+            try:
+                bodies = [b for b in occ.bRepBodies if b.isSolid]
+            except Exception:
+                bodies = []
             if bodies:
                 got[cname] = bodies
+        try:
+            children = list(occ.childOccurrences)
+        except Exception:
+            children = []
+        for child in children:
+            visit(child)
+
+    try:
+        occurrences = list(design.rootComponent.occurrences)
+    except Exception:
+        occurrences = []
+    for occ in occurrences:
+        visit(occ)
+
     out = []
     for name in included_names:
         out.extend(got.get(name, []))
     return out
 
 
-def resolve_named_components(design, profile):
+def resolve_named_components(design, profile, off_names=()):
     present = component_names(design)
     included, missing = sheet_core.select_component_names(present, profile.get('components', []))
     warnings = []
     if missing:
         warnings.append("component(s) not found: " + ", ".join(missing))
-    return _component_solid_bodies(design, included), warnings
+    return _component_solid_bodies(design, included, off_names), warnings
 
 
 RESOLVERS = {
@@ -308,16 +407,26 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
     header = [h.strip() for h in rows[0]]
     if not header or not header[0]:
         raise RuntimeError('The first header cell must be "Name".')
-    param_names = header[1:]
-
     src_design = adsk.fusion.Design.cast(app.activeProduct)
     if not src_design:
         raise RuntimeError('Open the parametric source model as the active design before running this command.')
 
-    all_params = src_design.allParameters
-    missing = [p for p in param_names if not all_params.itemByName(p)]
-    if missing:
-        raise RuntimeError('These columns do not match any parameter in the model: ' + ', '.join(missing))
+    # Classify the header against the model once: parameter columns get
+    # applied, component columns switch parts off per row. Only headers that
+    # match neither are fatal — a toggle column is not a missing parameter.
+    cols = sheet_core.classify_columns(
+        header, known_param_names(src_design),
+        top_level_component_names(src_design), component_names(src_design))
+    param_columns = cols['parameters']
+    toggle_columns = cols['toggles']
+    param_names = [name for _, name in param_columns]
+
+    if cols['unknown']:
+        raise RuntimeError('These columns do not match any parameter or top-level '
+                           'component in the model: ' + ', '.join(cols['unknown']))
+    if cols['sub_components']:
+        raise RuntimeError('These columns name sub-components, which cannot be '
+                           'switched on or off: ' + ', '.join(cols['sub_components']))
 
     enabled = [p for p in profiles if p.get('enabled')]
     if not enabled:
@@ -374,7 +483,7 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 # driving dimension recomputes the model, which can invalidate the
                 # parameter collection (see build_engine._design()'s docstring).
                 values = {}
-                for col, pname in enumerate(param_names, start=1):
+                for col, pname in param_columns:
                     if col < len(row):
                         val = row[col].strip()
                         if val:
@@ -382,13 +491,21 @@ def build_exports(sheet_url, spacing_cm, profiles, tab_name=None):
                 build_engine.apply_values(values)
                 adsk.doEvents()  # recompute the source with this variant's values
 
+                # Components this row switches off. Purely a read of the sheet —
+                # the source model is never modified, the bodies are simply not
+                # collected below.
+                toggles = sheet_core.row_toggles(row, toggle_columns)
+                off_names = [name for name, keep in toggles.items() if not keep]
+
                 design = adsk.fusion.Design.cast(app.activeProduct)  # fresh after recompute
                 for ctx in active:
                     resolver = RESOLVERS[ctx['profile']['rule']]
-                    src_bodies, _warn = resolver(design, ctx['profile'])
+                    src_bodies, _warn = resolver(design, ctx['profile'], off_names)
                     snaps = build_engine.snapshot_bodies(src_bodies)
                     if snaps:
                         ctx.setdefault('variants', []).append((safe_name, snaps))
+                    else:
+                        ctx.setdefault('skipped_variants', []).append(safe_name)
                 progress.progressValue = i + 1
         finally:
             # Restore the source model — re-derive fresh per parameter, since each
@@ -537,26 +654,46 @@ def create_template(use_favorites):
     base = (app.activeDocument.name or 'variants').split(' v')[0]
     dlg.initialFilename = (re.sub(r'[^A-Za-z0-9_\- ]', '_', base).strip() or 'variants') + '_variants.csv'
     if dlg.showSave() != adsk.core.DialogResults.DialogOK:
-        return None, 0
+        return None, 0, 0
 
     path = dlg.filename
     if not path.lower().endswith('.csv'):
         path += '.csv'
 
-    header = ['Name'] + [p.name for p in params]
+    # One TRUE column per top-level component, so the on/off feature is
+    # visible without reading the docs. TRUE everywhere is exactly today's
+    # behaviour, so a generated template still builds an identical result.
+    # A component sharing a parameter's name is skipped: the parameter wins
+    # when the header is classified, so the column would never be read as a
+    # toggle.
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    # Filter against EVERY parameter in the design, not just the ones becoming
+    # columns here. classify_columns resolves a name that is both a parameter
+    # and a component in favour of the parameter, and it is given
+    # known_param_names(design) — all parameters, favorites or not. A component
+    # sharing a non-favorite parameter's name would otherwise be written as a
+    # TRUE column, read back as a parameter column, and fail the build trying to
+    # set that parameter to "TRUE".
+    all_param_names = set(known_param_names(design))
+    comp_names = [n for n in top_level_component_names(design)
+                  if n not in all_param_names]
+
+    header = ['Name'] + [p.name for p in params] + comp_names
     # One example row seeded with the model's current expressions, so the
     # expected "value + unit" format is obvious. Text parameters are written
     # without their surrounding quotes (so 'A-6' becomes A-6) to keep the sheet
     # tidy; the quotes are re-added automatically on import based on the model's
     # parameter type, so a value can even be a number used as engraving text.
-    example = ['Variant_1'] + [sheet_core.unquote_text(p.expression) for p in params]
+    example = (['Variant_1']
+               + [sheet_core.unquote_text(p.expression) for p in params]
+               + ['TRUE'] * len(comp_names))
 
     with open(path, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(header)
         writer.writerow(example)
 
-    return path, len(params)
+    return path, len(params), len(comp_names)
 
 
 # --------------------------------------------------------------------------- #
@@ -645,7 +782,8 @@ def _run_build_validation(inputs):
         _build_report['ok'] = False
         return
     rep = sheet_core.validate_mapping(
-        rows[0], rows[1:], known_param_names(design), driveable_param_names(design))
+        rows[0], rows[1:], known_param_names(design), driveable_param_names(design),
+        top_level_component_names(design), component_names(design))
     report_box.formattedText = rep.to_html()
     _build_report['ok'] = rep.ok
 
@@ -947,13 +1085,14 @@ class TemplateExecuteHandler(adsk.core.CommandEventHandler):
         try:
             inputs = args.command.commandInputs
             use_favorites = inputs.itemById('source').selectedItem.name.startswith('Favorite')
-            path, n = create_template(use_favorites)
+            path, n, c = create_template(use_favorites)
             if path is None:
                 return  # user cancelled the save dialog
+            comp_note = (' and {} component on/off column(s)'.format(c)) if c else ''
             ui.messageBox(
-                'Template with {} parameter column(s) saved to:\n{}\n\n'
+                'Template with {} parameter column(s){} saved to:\n{}\n\n'
                 'In Google Sheets: File > Import > Upload, then fill in one row per variant. '
-                'Use the same link with "Build Variants Assembly".'.format(n, path))
+                'Use the same link with "Build Variants Assembly".'.format(n, comp_note, path))
         except Exception:
             if ui:
                 ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))

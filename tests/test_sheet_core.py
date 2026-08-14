@@ -369,3 +369,242 @@ def test_validate_clean_sheet_summary():
     rep = sheet_core.validate_mapping(header, rows, {"diameter", "hoogte"}, ["diameter", "hoogte"])
     assert rep.ok
     assert "2 columns mapped" in rep.summary()
+
+
+def test_validate_toggle_column_is_accepted():
+    header = ["Name", "diameter", "Drawer"]
+    rows = [["V1", "18 mm", "FALSE"]]
+    rep = sheet_core.validate_mapping(
+        header, rows, {"diameter"}, ["diameter"],
+        top_level_names=["Drawer"], all_component_names=["Drawer"])
+    assert rep.ok
+    assert rep.toggle_columns == 1
+    assert "1 on/off" in rep.summary()
+
+
+def test_validate_summary_unchanged_when_there_are_no_toggles():
+    header = ["Name", "diameter", "hoogte"]
+    rows = [["V1", "18 mm", "5 mm"], ["V2", "20 mm", "6 mm"]]
+    rep = sheet_core.validate_mapping(header, rows, {"diameter", "hoogte"},
+                                      ["diameter", "hoogte"])
+    assert rep.summary() == "✓ 2 columns mapped, 2 rows OK"
+
+
+def test_validate_bad_toggle_value_is_error_with_cell_ref():
+    header = ["Name", "Drawer"]
+    rows = [["V1", "TRUE"], ["V2", "maybe"]]
+    rep = sheet_core.validate_mapping(
+        header, rows, set(), [], top_level_names=["Drawer"])
+    assert not rep.ok
+    assert any("maybe" in e and "B3" in e for e in rep.errors)
+
+
+def test_validate_blank_toggle_cells_are_their_own_warning():
+    header = ["Name", "Drawer"]
+    rows = [["V1", ""], ["V2", ""]]
+    rep = sheet_core.validate_mapping(
+        header, rows, set(), [], top_level_names=["Drawer"])
+    assert rep.ok
+    assert any("2 blank on/off cell(s)" in w and "stay in" in w
+               for w in rep.warnings)
+    # Must NOT be counted as a parameter "empty cell" — that message says
+    # "left unchanged", which is the wrong thing to tell someone about a toggle.
+    assert not any("left unchanged" in w for w in rep.warnings)
+
+
+def test_validate_sub_component_column_is_error():
+    header = ["Name", "Side_L"]
+    rows = [["V1", "TRUE"]]
+    rep = sheet_core.validate_mapping(
+        header, rows, set(), [], top_level_names=["Carcass"],
+        all_component_names=["Carcass", "Side_L"])
+    assert not rep.ok
+    assert any("Side_L" in e and "sub-component" in e for e in rep.errors)
+
+
+def test_validate_unknown_column_mentions_components_now():
+    header = ["Name", "Drawr"]
+    rows = [["V1", "TRUE"]]
+    rep = sheet_core.validate_mapping(
+        header, rows, set(), [], top_level_names=["Drawer"])
+    assert not rep.ok
+    assert any("Drawr" in e and "component" in e for e in rep.errors)
+
+
+def test_validate_collision_is_a_warning_not_an_error():
+    header = ["Name", "Door"]
+    rows = [["V1", "18 mm"]]
+    rep = sheet_core.validate_mapping(
+        header, rows, {"Door"}, ["Door"], top_level_names=["Door"])
+    assert rep.ok
+    assert any("Door" in w and "read as a parameter" in w for w in rep.warnings)
+
+
+def test_parse_toggle_on_words():
+    for text in ("TRUE", "true", " True ", "1", "yes", "Y", "on", "ON"):
+        assert sheet_core.parse_toggle(text) is True, text
+
+
+def test_parse_toggle_off_words():
+    for text in ("FALSE", "false", " False ", "0", "no", "N", "off", "OFF"):
+        assert sheet_core.parse_toggle(text) is False, text
+
+
+def test_parse_toggle_blank_keeps_the_component():
+    # A blank cell must mean "in", matching the existing rule that a blank
+    # parameter cell leaves that parameter unchanged.
+    assert sheet_core.parse_toggle("") is True
+    assert sheet_core.parse_toggle("   ") is True
+    assert sheet_core.parse_toggle(None) is True
+
+
+def test_parse_toggle_unrecognised_is_none():
+    # None is distinct from False: a typo must be reportable as an error
+    # rather than silently removing a component.
+    for text in ("maybe", "2", "-1", "true-ish", "aan"):
+        assert sheet_core.parse_toggle(text) is None, text
+
+
+def test_classify_columns_splits_parameters_and_toggles():
+    cols = sheet_core.classify_columns(
+        ["Name", "length", "Drawer"],
+        param_names={"length"},
+        top_level_names=["Carcass", "Drawer"])
+    assert cols["parameters"] == [(1, "length")]
+    assert cols["toggles"] == [(2, "Drawer")]
+    assert cols["unknown"] == []
+    assert cols["sub_components"] == []
+    assert cols["collisions"] == []
+
+
+def test_classify_columns_parameter_wins_a_collision():
+    # Preserves today's behaviour: a column that matched a parameter before
+    # this feature existed must still be read as a parameter.
+    cols = sheet_core.classify_columns(
+        ["Name", "Door"],
+        param_names={"Door"},
+        top_level_names=["Door"])
+    assert cols["parameters"] == [(1, "Door")]
+    assert cols["toggles"] == []
+    assert cols["collisions"] == ["Door"]
+
+
+def test_classify_columns_flags_a_sub_component():
+    cols = sheet_core.classify_columns(
+        ["Name", "Side_L"],
+        param_names=set(),
+        top_level_names=["Carcass"],
+        all_component_names=["Carcass", "Side_L"])
+    assert cols["sub_components"] == ["Side_L"]
+    assert cols["toggles"] == []
+    assert cols["unknown"] == []
+
+
+def test_classify_columns_flags_an_unknown_header():
+    cols = sheet_core.classify_columns(
+        ["Name", "Drawr"],
+        param_names={"length"},
+        top_level_names=["Drawer"],
+        all_component_names=["Drawer"])
+    assert cols["unknown"] == ["Drawr"]
+    assert cols["sub_components"] == []
+
+
+def test_classify_columns_ignores_column_a_and_strips_whitespace():
+    cols = sheet_core.classify_columns(
+        ["Name", " length ", " Drawer "],
+        param_names={"length"},
+        top_level_names=["Drawer"])
+    assert cols["parameters"] == [(1, "length")]
+    assert cols["toggles"] == [(2, "Drawer")]
+
+
+def test_classify_columns_with_no_components_matches_todays_behaviour():
+    # Called with the defaults, every non-parameter column is unknown, exactly
+    # as before this feature existed.
+    cols = sheet_core.classify_columns(
+        ["Name", "length", "bogus"], param_names={"length"}, top_level_names=[])
+    assert cols["parameters"] == [(1, "length")]
+    assert cols["unknown"] == ["bogus"]
+    assert cols["toggles"] == []
+
+
+def test_classify_columns_reports_a_blank_header():
+    # A column with values but no header must not vanish: today's
+    # validate_mapping errors on it, and a column that quietly does nothing
+    # is invisible in the built output.
+    cols = sheet_core.classify_columns(
+        ["Name", "length", "", "   "],
+        param_names={"length"},
+        top_level_names=["Drawer"])
+    assert cols["parameters"] == [(1, "length")]
+    assert cols["unknown"] == ["", ""]
+    assert cols["toggles"] == []
+
+
+def test_validate_blank_header_column_still_errors():
+    # A column with values but no header must block the build. This preserves
+    # what the add-in did before component columns existed, and it is an
+    # explicit project decision — do not "simplify" the empty-name case out of
+    # validate_mapping's unknown-column loop without revisiting it.
+    header = ["Name", "diameter", ""]
+    rows = [["V1", "18 mm", "3"]]
+    rep = sheet_core.validate_mapping(header, rows, {"diameter"}, ["diameter"])
+    assert not rep.ok
+    assert any("matches no parameter" in e for e in rep.errors)
+
+
+def test_row_toggles_reads_each_column():
+    result = sheet_core.row_toggles(
+        ["Unit_S", "500 mm", "FALSE", "TRUE"],
+        [(2, "Drawer"), (3, "Door")])
+    assert result == {"Drawer": False, "Door": True}
+
+
+def test_row_toggles_treats_a_short_row_as_blank():
+    # Trailing blank cells are often omitted entirely; a missing cell must
+    # mean "in", the same as an explicitly blank one.
+    result = sheet_core.row_toggles(["Unit_S", "500 mm"], [(2, "Drawer")])
+    assert result == {"Drawer": True}
+
+
+def test_row_toggles_keeps_the_component_on_an_unrecognised_value():
+    # Check blocks the build before this can happen. If it ever does, failing
+    # toward keeping the part is the recoverable direction: an extra part is
+    # visible, a missing one is not.
+    result = sheet_core.row_toggles(["Unit_S", "maybe"], [(1, "Drawer")])
+    assert result == {"Drawer": True}
+
+
+def test_row_toggles_rightmost_duplicate_column_wins():
+    result = sheet_core.row_toggles(
+        ["Unit_S", "TRUE", "FALSE"], [(1, "Drawer"), (2, "Drawer")])
+    assert result == {"Drawer": False}
+
+
+def test_row_toggles_with_no_toggle_columns_is_empty():
+    assert sheet_core.row_toggles(["Unit_S", "500 mm"], []) == {}
+
+
+def test_summarize_reports_variants_that_had_nothing_to_build():
+    results = [{"name": "Kitchen", "built": 2, "skipped_variants": ["Unit_X"]}]
+    text = sheet_core.summarize_results(results)
+    assert "Kitchen (2 variant(s))" in text
+    assert "Unit_X" in text
+    assert "nothing to build" in text
+
+
+def test_summarize_combines_warnings_and_skipped_variants():
+    results = [{"name": "Kitchen", "built": 1,
+                "warnings": ["component(s) not found: Ghost"],
+                "skipped_variants": ["Unit_X", "Unit_Y"]}]
+    text = sheet_core.summarize_results(results)
+    assert "Ghost" in text
+    assert "2 variant(s)" in text
+    assert "Unit_X, Unit_Y" in text
+
+
+def test_summarize_unchanged_without_skipped_variants():
+    results = [{"name": "Full model", "built": 3}]
+    assert sheet_core.summarize_results(results) == (
+        "Built:\n  • Full model (3 variant(s))")

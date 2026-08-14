@@ -41,7 +41,7 @@ component's name, and `TRUE`/`FALSE` in the cells.
 | Unrecognised value | Check **error** — the build is blocked |
 | Interaction with export profiles | Applies to **every** profile; off wins over a profile's include list |
 | Variant left with no bodies | That variant is skipped with a note; the profile still builds the rest |
-| Test tab preview | Honours toggles (component's light bulb off during preview) |
+| Test tab preview | DEFERRED — not implemented; see verification item 8 |
 | Template generator | Emits one `TRUE` column per top-level component |
 
 ### Rejected alternatives
@@ -129,6 +129,15 @@ afterwards.
 Both resolvers take the row's off-set as an argument; an empty off-set reproduces
 today's behaviour exactly.
 
+**Note on component-name uniqueness.** The off-set is checked at every depth of
+the walk because Fusion enforces unique component names *within a document* —
+it does not extend that guarantee to an externally linked sub-assembly. A
+linked sub-assembly can contain its own component sharing a top-level
+component's name, and switching that top-level component off would prune the
+linked one too. It is visible in the output (a part goes missing where it
+should not have) rather than silently wrong, but it is outside this feature's
+intended scope.
+
 ### Keyed by name
 
 Two top-level occurrences of the same component (`Drawer:1`, `Drawer:2`) share
@@ -165,14 +174,14 @@ existing tests keep describing existing behaviour.
 | `resolve_whole_model` / `resolve_named_components` | Take and forward the off-set |
 | `build_exports` | Splits each row into values and toggles; the "columns match no parameter" guard at line 318 must exempt toggle columns |
 | `create_template` | Appends one `TRUE` column per top-level component |
-| `_preview_test_row` | Switches off components' light bulbs for the preview |
+| `_preview_test_row` | DEFERRED — not implemented; see verification item 8 |
 
 ## Check report
 
 New errors — all block the build, consistent with today's rule:
 
-- `Column "Side_L" is a sub-component of "Carcass" — only top-level components
-  can be switched on or off.`
+- `Column "Side_L" is a sub-component — only top-level components can be
+  switched on or off.`
 - `Column "Drawr" matches no parameter or top-level component in the model.`
   (widening of the existing message)
 - `Cell D3 ("maybe") is not a yes/no value — use TRUE or FALSE.`
@@ -206,6 +215,9 @@ outcome: a variant vanishing from an output design with no explanation reads as
 a bug in the add-in.
 
 ## Test tab preview
+
+**Deferred — not implemented on this branch.** See item 8 of the verification
+checklist.
 
 The Test tab applies a row's parameters to the live model so it can be
 inspected. Without this change, previewing a row whose `Drawer` is `FALSE` still
@@ -267,7 +279,8 @@ In:
 - Toggle columns for top-level components, applied to every export profile.
 - Check-report classification, errors and warnings.
 - Skipped-variant reporting in the run summary.
-- Test tab preview honouring toggles.
+- **Deferred — not implemented on this branch.** See item 8 of the
+  verification checklist. Test tab preview honouring toggles.
 - Template generator emitting toggle columns.
 - README documentation of the sheet layout and the rules.
 
