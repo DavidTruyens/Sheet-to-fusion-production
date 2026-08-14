@@ -37,6 +37,80 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
   Previewing a row still shows every component regardless of its `FALSE`
   cells; only the preview is wrong — a build itself applies toggles correctly.
 
+## 1.17.2 — Update Children fixes from first real use
+
+- **A fillet on a placeholder box is no longer mistaken for a rotation.** The
+  check asked for exactly two distinct vertex coordinates per axis; rounding a
+  box's edges puts vertices at the fillet tangent points, giving four
+  (`min`, `min+r`, `max-r`, `max`) on a box that is perfectly square to its
+  frame. Every filleted placeholder read `rotated — re-run Fill Placeholders`
+  permanently, and re-filling could not clear it because the geometry was never
+  the problem. Orientation is now judged from the body's **flat faces**, which a
+  fillet adds nothing to and a chamfer only adds to. A body too far from a box to
+  vouch for — a tube, a sheet — is still reported rather than measured.
+- **A mother saved to a new version is picked up.** A mother saved to v18 was
+  still being read as v17, because the version came from a `DataFile` that lags
+  the document it describes. An open mother's version is now whichever of its two
+  version numbers is further ahead, so a save is noticed immediately instead of
+  one run later.
+- **A mother whose version can't be read is no longer reported as missing.**
+  Fusion's `findFileById` can refuse a valid lineage id — including the id a
+  document reports about *itself*, offline and online alike — and a failed
+  lookup was being treated as "this mother does not exist", which **disabled
+  every row** and made the dialog unusable rather than merely uninformative.
+  An unresolvable version now shows `unknown version` on a row you can still
+  tick and rebuild. Only a genuinely missing lookup at rebuild time reports a
+  missing mother, and it now tells you to open the mother and try again.
+- **A mother's version is read from the open document where possible**, with no
+  data-panel lookup at all — the reliable path, and the normal case, since you
+  have usually just been editing it. Children also record the mother's
+  version-specific id as a second key for when it is not open.
+- **The comparison uses the mother's latest version**, not the version a
+  lookup happened to land on, so a mother resolved through an older id can no
+  longer make every child look up to date.
+- **One mother, one heading — and one heading, one mother.** Groups are keyed on
+  the mother's file id now, not its name. A rotated child used to make its mother
+  render a second, contradictory heading (`mother1 — v16` above it, `mother1 —
+  v16 is out of date` above its siblings), because the heading was derived from a
+  single child's staleness, which is suppressed for a child with its own problem.
+  Two different mothers that happened to share a name and a version merged into
+  one group as though they were the same model; one mother recorded under two
+  names split into two groups.
+- **Headings name both versions**: `Base Cabinet — built from v12, now v14`
+  instead of `v12 is out of date`, which gave you nothing to compare against.
+- **The mother's name no longer carries a version suffix.** It was recorded from
+  the document name (`mother1 v16`) instead of the file name (`mother1`), so
+  headings read as though the version had been printed twice. Names already
+  stored that way are re-read from the file, so existing children display
+  correctly without being rebuilt, and a rebuild records the corrected name.
+- **Update Children refuses a mother that is open at an older version than its
+  newest**, naming both versions. Driving it would have built children from the
+  old version while the dialog advertised the new one, then stamped the old
+  version onto them and offered the same rebuild forever. Only that mother's
+  children fail; the rest of the run continues. Fill Placeholders is deliberately
+  left alone for now — see below.
+- A child whose mother sits in a sub-assembly no longer reports its mother's
+  version as unknown just because none of that mother's children are at the top
+  level.
+- A failed mother lookup reports Fusion's own reason, so a permission, hub or
+  network failure is no longer indistinguishable from a deleted file.
+- The status column is wider; it was truncating its own instructions mid-word.
+
+Measured with `spikes/SVSpike6VersionIds`: `latestVersionNumber` **is**
+lineage-wide — an older version's record reports its own `versionNumber` as 2
+alongside `latestVersionNumber` 3 — so a mother resolved through either id
+answers the staleness question correctly. The same run found `findFileById`
+resolving a lineage urn it had refused earlier, so that failure is intermittent
+rather than permanent, which is what the fallback is for.
+
+Still open: which of an open document's version numbers keeps up with its own
+saves. Real use has shown they can disagree — a document at v18 alongside a
+record still reading v17 — so the refusal above triggers only when the open
+version is genuinely BEHIND, never merely different, and applies to Update
+Children only: a wrong guess there costs one mother's rows and a clear message,
+where in Fill Placeholders it would abort the whole run on the commonest
+workflow there is. Once measured it can cover both.
+
 ## 1.17.0 — Update children
 
 - **Update Children** — one dialog listing every child in the layout, grouped

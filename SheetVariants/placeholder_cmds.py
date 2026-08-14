@@ -253,6 +253,31 @@ def _body_vertices(body):
     return out
 
 
+def _flat_face_normals(body):
+    """Unit normals of every FLAT face of ``body``, in the same space its vertices
+    are read in.
+
+    Curved faces are skipped rather than approximated: a fillet says nothing about
+    which way a box is turned, and treating one as if it did is what reported
+    every filleted placeholder as rotated. Only parallelism is tested downstream,
+    so an inward-pointing normal is as good as an outward one.
+    """
+    normals = []
+    faces = body.faces
+    for i in range(faces.count):
+        try:
+            plane = adsk.core.Plane.cast(faces.item(i).geometry)
+            if not plane:
+                continue
+            normal = plane.normal
+            normals.append((normal.x, normal.y, normal.z))
+        except Exception:
+            # One unreadable face must not decide the whole body's orientation;
+            # the remaining flat faces still answer the question.
+            continue
+    return normals
+
+
 def _body_identity(body):
     """A stable identity for ``body``, for deduplicating repeated selections.
 
@@ -389,7 +414,11 @@ def _mother_options(design):
                 cached = options.get(doc.dataFile.id)
                 tab = cached['tab'] if cached else ''
             options[doc.dataFile.id] = {
-                'fileId': doc.dataFile.id, 'name': doc.name,
+                # dataFile.name, NOT doc.name: an open document's name carries a
+                # version suffix, so doc.name is 'mother1 v16' and every heading
+                # built from it read "mother1 v16 — v16" as though the version
+                # had been printed twice.
+                'fileId': doc.dataFile.id, 'name': doc.dataFile.name,
                 'sheetUrl': sheet_url, 'tab': tab}
         except Exception:
             continue
@@ -596,27 +625,6 @@ UPDATE_CMD_DESC = ('Rebuild children whose mother model has moved on, or whose '
 _survey = []
 
 
-def _version_text(version):
-    """'vN', or an honest 'unknown version' rather than the literal 'vNone' a
-    bare '{}'.format(None) would produce for a recipe whose mother.version was
-    never resolved — matching the wording placeholder_core.status_label
-    already uses for the same case in the row's own status column."""
-    return 'v{}'.format(version) if version is not None else 'unknown version'
-
-
-def _mother_heading(row):
-    recipe = row['recipe']
-    stored = recipe['mother']['version']
-    # Compare against the exported constant, not a literal copy of the prose
-    # — see PROBLEM_MOTHER_NOT_FOUND's own docstring in placeholder_core.
-    if row['status']['problem'] == placeholder_core.PROBLEM_MOTHER_NOT_FOUND:
-        return '{} — missing'.format(recipe['mother']['name'] or '(unnamed)')
-    if row['status']['staleness'] == placeholder_core.STALE_OUT_OF_DATE:
-        return '{} — {} is out of date'.format(recipe['mother']['name'],
-                                               _version_text(stored))
-    return '{} — {}'.format(recipe['mother']['name'], _version_text(stored))
-
-
 class UpdateCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
@@ -641,14 +649,23 @@ class UpdateCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     2, True)
                 return
 
-            table = inputs.addTableCommandInput('children', 'Children', 4, '1:3:3:4')
+            # The status column is the widest because it carries whole
+            # instructions ("rotated — re-run Fill Placeholders"), which Fusion
+            # truncates mid-word rather than wrapping, hiding the very advice
+            # that tells you what to do about the row.
+            table = inputs.addTableCommandInput('children', 'Children', 4, '1:3:2:7')
             table.maximumVisibleRows = 14
             table.minimumVisibleRows = 6
-            last_mother = None
+            # Break groups on the heading KEY, not on its text. Two distinct
+            # mother files sharing a name and a version render identical text, so
+            # comparing text merged them into one group as though they were the
+            # same model — see placeholder_core.mother_heading_key.
+            last_mother = object()
             for index, row in enumerate(_survey):
-                heading = _mother_heading(row)
-                if heading != last_mother:
-                    last_mother = heading
+                key = placeholder_core.mother_heading_key(row)
+                heading = placeholder_core.mother_heading_for_row(row)
+                if key != last_mother:
+                    last_mother = key
                     label = inputs.addTextBoxCommandInput(
                         'head{}'.format(index), '', '<b>{}</b>'.format(heading), 1, True)
                     table.addCommandInput(label, table.rowCount, 0, 0, 3)
@@ -960,10 +977,55 @@ def _cm(value):
     return '{:.6f} cm'.format(value)
 
 
-def _open_mother(file_id):
+def _refuse_stale_open_version(doc, data_file):
+    """Refuse to drive a mother that is OPEN at an older version than its newest.
+
+    Update Children compares children against the lineage's latest version, so a
+    dialog reading "built from v14, now v16" that then drove a v14 document would
+    report success, stamp v14 back onto every child, and pre-tick the same rows
+    next time — telling someone their children match v16 when they carry v14
+    geometry.
+
+    Applied to Update Children ONLY, deliberately, even though Fill Placeholders
+    shares _open_mother and has a milder version of the same exposure. This rests
+    on an open document's DataFile.versionNumber tracking the tip immediately
+    after the user saves that document in the same session, and nothing here has
+    measured that (spikes/SVSpike6VersionIds asks it). If Fusion hands back the
+    pre-save DataFile, this refuses on the single most common workflow there is —
+    edit the mother, save, leave it open, fill — and Fill has no graceful way to
+    carry on: it aborts the whole run. Update Children catches the raise per
+    mother and turns it into that mother's rows failing, so a wrong guess there
+    costs a diagnosable message rather than the command. Once measured, this can
+    move into _open_mother for both.
+
+    Stays silent when the numbers will not read. Nothing can be proven then, and
+    refusing on an unreadable property would block the ordinary case offline.
+    """
+    open_at = _int_or_none(data_file, 'versionNumber')
+    latest = _int_or_none(data_file, 'latestVersionNumber')
+    if open_at is None or latest is None or open_at >= latest:
+        return
+    # BEHIND, not merely different. A mother saved to v18 was seen with a
+    # DataFile still reporting v17, so open_at can legitimately exceed latest —
+    # and refusing on that would have thrown "open at v18, but v17 is the newest",
+    # which is both nonsense and a dead end.
+    raise RuntimeError(
+        'The mother "{}" is open at v{}, but v{} is the newest version. Close it '
+        'and run this again, so children are built from the newest version.'
+        .format(_file_name(data_file) or doc.name, open_at, latest))
+
+
+def _open_mother(file_id, require_latest=False):
     """(document, opened_by_us). Reuses an already-open document; refuses one with
     unsaved changes, because a run edits and restores its parameters and a crash
-    partway would leave someone else's work in a variant state."""
+    partway would leave someone else's work in a variant state.
+
+    Deliberately does NOT accept a recipe's recorded versionId as a fallback key,
+    even though _resolve_mother_file does and findFileById can refuse a lineage
+    id. documents.open() opens the version its DataFile names, so resolving
+    through a versionId recorded at fill time would silently open and drive the
+    OLD mother — rebuilding children off v14 when the point of the run is v16.
+    Refusing with actionable advice beats quietly building the wrong thing."""
     for i in range(app.documents.count):
         doc = app.documents.item(i)
         try:
@@ -999,10 +1061,26 @@ def _open_mother(file_id):
                 raise RuntimeError(
                     'The mother "{}" has unsaved changes. Save or discard them '
                     'before filling placeholders.'.format(doc.name))
+            if require_latest:
+                _refuse_stale_open_version(doc, data_file)
             return doc, False
-    data_file = app.data.findFileById(file_id)
+    reason = ''
+    try:
+        data_file = app.data.findFileById(file_id)
+    except Exception as err:
+        # findFileById RAISES "3 : file not found" rather than returning None for
+        # a lineage id it will not answer for (spike 5), so the bare call cannot
+        # stand in for a None check. The message is kept rather than swallowed:
+        # a permission, hub or network failure reads nothing like a missing file,
+        # and reporting all of them as "not found" hides the real cause.
+        data_file, reason = None, ' ({})'.format(_exc_text(err))
     if not data_file:
-        raise RuntimeError('The mother model could not be found in your projects.')
+        # Actionable, because the likeliest cause is not a deleted file: Fusion's
+        # findFileById has been seen refusing a perfectly valid lineage id, and
+        # opening the mother yourself sidesteps the lookup entirely.
+        raise RuntimeError(
+            'The mother model could not be found in your projects{}. If the file '
+            'does still exist, open it in Fusion and run this again.'.format(reason))
     return app.documents.open(data_file), True
 
 
@@ -1127,6 +1205,8 @@ def build_children(slots, mother, config):
     doc = None
     opened_by_us = False
     version = None
+    version_id = ''
+    file_name = ''
     cancelled_at = None
     unrestored_names = set()
 
@@ -1146,6 +1226,25 @@ def build_children(slots, mother, config):
                           len(slots), 0)
             doc, opened_by_us = _open_mother(mother['fileId'])
             version = doc.dataFile.versionNumber if doc.dataFile else None
+            # Guarded on its own: versionId is only a fallback lookup key for a
+            # LATER run, so a DataFile that will not answer for it must not
+            # abort this fill, which needs nothing from it.
+            try:
+                version_id = doc.dataFile.versionId if doc.dataFile else ''
+            except Exception:
+                version_id = ''
+            # From the FILE, not from mother['name']: a mother that was closed
+            # when this dialog opened is described by the settings cache, whose
+            # names were written under the old doc.name behaviour and so carry a
+            # version suffix ('mother1 v16'). The document is open by now, so the
+            # real name is available and worth recording instead.
+            file_name = _file_name(doc.dataFile)
+            if file_name:
+                # Written back into the caller's own descriptor, which is what
+                # remember_mother persists — otherwise settings.json keeps the
+                # old doc.name-derived 'mother1 v16' indefinitely and the
+                # dropdown shows it for every closed mother.
+                mother['name'] = file_name
             doc.activate()
             adsk.doEvents()
             mother_design = adsk.fusion.Design.cast(app.activeProduct)
@@ -1350,7 +1449,8 @@ def build_children(slots, mother, config):
 
                 recipe = placeholder_core.new_child_recipe(
                     slot_id=slot['slotId'],
-                    mother={'fileId': mother['fileId'], 'name': mother['name'],
+                    mother={'fileId': mother['fileId'],
+                            'name': file_name or mother['name'],
                             'version': version},
                     # rows_url/rows_tab are '' for a size-only child, so the
                     # recipe records that no sheet was involved and a later
@@ -1358,7 +1458,8 @@ def build_children(slots, mother, config):
                     config=config, sheet_url=rows_url, tab=(rows_tab or ''),
                     dims_cm=slot['dims_cm'],
                     bodies=body_names,
-                    built_at=built_at)
+                    built_at=built_at,
+                    version_id=version_id)
                 occurrence.component.attributes.add(
                     placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
                     placeholder_core.dumps_attr(recipe))
@@ -1461,7 +1562,7 @@ def update_children(rows):
     for row in rows:
         by_mother.setdefault(row['recipe']['mother']['fileId'], []).append(row)
 
-    snapshots, versions, failures = {}, {}, []
+    snapshots, versions, version_ids, mother_names, failures = {}, {}, {}, {}, []
     # {fileId: (doc, opened_by_us)} — closed only in the OUTER finally, after
     # Phase 2, because reapply_looks() (called from rebuild_child) still needs
     # each mother's live Appearance/Material objects until then. Copies
@@ -1503,9 +1604,14 @@ def update_children(rows):
             for file_id, group in by_mother.items():
                 if cancelled:
                     break
-                mother_name = group[0]['recipe']['mother']['name']
+                # The survey's resolved name, falling back to the recorded one:
+                # a child built before the name fix recorded the document name
+                # ('mother1 v16'), and every message below would otherwise quote
+                # it back — the same stale text the headings no longer show.
+                mother_name = (group[0].get('mother_name')
+                               or group[0]['recipe']['mother']['name'])
                 try:
-                    doc, opened_by_us = _open_mother(file_id)
+                    doc, opened_by_us = _open_mother(file_id, require_latest=True)
                 except Exception as err:
                     # Broader than _open_mother's documented RuntimeError: a
                     # Fusion API failure opening ONE mother must not sink every
@@ -1566,6 +1672,18 @@ def update_children(rows):
                         continue
                     versions[file_id] = (doc.dataFile.versionNumber
                                         if doc.dataFile else None)
+                    try:
+                        version_ids[file_id] = (doc.dataFile.versionId
+                                                if doc.dataFile else '')
+                    except Exception:
+                        # See build_children: a fallback key for a later run is
+                        # never worth failing this mother's children over.
+                        version_ids[file_id] = ''
+                    # Re-read from the FILE, so a rebuild heals a name recorded
+                    # from the document ('mother1 v16') instead of carrying it
+                    # forward forever. Copying recipe['mother']['name'] here is
+                    # what made that stale name immortal.
+                    mother_names[file_id] = _file_name(doc.dataFile)
                     mother_unrestored = set()
                     drove_ok = False   # at least one clean _snapshot_for (M7)
                     for row in group:
@@ -1811,11 +1929,19 @@ def update_children(rows):
                     placeholder_core.pair_bodies(recipe['bodies'], new_names))
                 updated = placeholder_core.new_child_recipe(
                     slot_id=recipe['slotId'],
-                    mother={'fileId': file_id, 'name': recipe['mother']['name'],
+                    mother={'fileId': file_id,
+                            'name': (mother_names.get(file_id)
+                                     or recipe['mother']['name']),
                             'version': versions.get(file_id)},
                     config=recipe['config'], sheet_url=recipe['sheetUrl'],
                     tab=recipe['tab'], dims_cm=row['dims_cm'],
-                    bodies=body_names, built_at=built_at)
+                    bodies=body_names, built_at=built_at,
+                    # `or`, not a default: a DataFile that would not answer for
+                    # versionId leaves '' in the dict, and writing that over a
+                    # key the recipe already holds would discard the fallback
+                    # permanently. migrate_child_recipe guarantees the key exists.
+                    version_id=(version_ids.get(file_id)
+                                or recipe['versionId']))
                 occurrence.component.attributes.add(
                     placeholder_core.ATTR_GROUP, placeholder_core.CHILD_RECIPE_ATTR,
                     placeholder_core.dumps_attr(updated))
@@ -1848,21 +1974,141 @@ def update_children(rows):
     return report + failures
 
 
-def _current_versions(recipes):
-    """{fileId: versionNumber or None}, resolving each mother exactly once. A
-    kitchen has a handful of mothers, so one data-panel lookup each is cheap; doing
-    it per child would not be."""
-    versions = {}
-    for recipe in recipes:
-        file_id = recipe['mother']['fileId']
-        if not file_id or file_id in versions:
+def _open_datafiles():
+    """{lineage id: DataFile} for every open document.
+
+    An open document's own DataFile answers latestVersionNumber directly, with no
+    data-panel lookup at all — the reliable path, and the normal case for this
+    dialog, since you have usually just been editing the mother.
+    """
+    files = {}
+    for index in range(app.documents.count):
+        try:
+            data_file = app.documents.item(index).dataFile
+            if data_file:
+                files[data_file.id] = data_file
+        except Exception:
+            # Same guard as _mother_options and _open_mother use on the same
+            # access: an untitled scratch document open anywhere in the session
+            # can raise here and must not take the whole survey down with it.
+            continue
+    return files
+
+
+def _resolve_mother_file(file_id, version_id, open_files):
+    """A mother's DataFile via whichever of its two ids answers, or None.
+
+    findFileById cannot be the only route: it has been observed raising
+    "3 : file not found" for the lineage urn a document reported about ITSELF,
+    both offline and after a restart while online (spike 5). So an already-open
+    document is preferred — no service call — then the version-specific id, then
+    the lineage id.
+
+    None means "could not resolve", which is NOT the same as "the mother is
+    gone"; callers must not report it as a missing file.
+
+    For READING version numbers only. Do not open the result: it may be an old
+    version's DataFile, and documents.open() would open that old version — see
+    _open_mother, which resolves the lineage id itself for exactly this reason.
+    """
+    already_open = open_files.get(file_id)
+    if already_open is not None:
+        return already_open
+    # Lineage id first, versionId second. Both work: spike 6 measured an OLD
+    # version's DataFile reporting versionNumber 2 alongside latestVersionNumber 3,
+    # so latestVersionNumber IS lineage-wide and a mother resolved either way
+    # answers the staleness question correctly. The lineage id still leads because
+    # its DataFile is the tip by definition and needs no such property; versionId
+    # is the fallback for findFileById refusing a lineage urn, which spike 5 saw
+    # and spike 6 later did not — intermittent, not permanent, which is exactly
+    # what a fallback is for.
+    for candidate in (file_id, version_id):
+        if not candidate:
             continue
         try:
-            data_file = app.data.findFileById(file_id)
-            versions[file_id] = data_file.versionNumber if data_file else None
+            found = app.data.findFileById(candidate)
         except Exception:
-            versions[file_id] = None
-    return versions
+            found = None
+        if found:
+            return found
+    return None
+
+
+def _file_name(data_file):
+    """A DataFile's own name, or ''. Guarded because not every DataFile property
+    answers — spike 5 found `versions` raising on a live file — and a name is only
+    display text, never worth failing a survey over."""
+    try:
+        return (data_file.name or '') if data_file else ''
+    except Exception:
+        return ''
+
+
+def _latest_version(data_file, is_open):
+    """The lineage's newest version number, or None if it cannot be determined.
+
+    latestVersionNumber, not versionNumber: the question is whether a NEWER
+    version exists than the child was built from, and a DataFile resolved from an
+    old versionId reports its own versionNumber as that old version — which would
+    make every child look up to date however far the mother had moved on.
+
+    For an ALREADY-OPEN document, versionNumber is the fallback: it is local data,
+    while latestVersionNumber can need the service and fail offline — which is the
+    state that started all of this, and where every row read "unknown version" and
+    nothing could be pre-ticked. An open document is normally at its newest
+    version, so the fallback is usually exact and errs toward under-reporting
+    staleness rather than inventing it. Not used for a closed file, where the
+    number would be whatever version the lookup happened to land on.
+    """
+    if data_file is None:
+        return None
+    latest = _int_or_none(data_file, 'latestVersionNumber')
+    if not is_open:
+        return latest
+    # For an OPEN document, whichever number is further ahead. Measured in real
+    # use: a mother saved to v18 still had a DataFile reporting v17, so trusting
+    # latestVersionNumber alone under-reports staleness right after a save — the
+    # moment someone runs Update Children. versionNumber is local data and needs
+    # no service, which also answers the offline case that started all of this.
+    # Taking the max errs toward offering a rebuild rather than hiding one, and
+    # is exact both for a document open at an older version and for one just
+    # saved past a lagging lineage record.
+    open_at = _int_or_none(data_file, 'versionNumber')
+    candidates = [v for v in (latest, open_at) if v is not None]
+    return max(candidates) if candidates else None
+
+
+def _int_or_none(obj, name):
+    """One integer property, or None if it will not read or is not an integer.
+    bool is excluded for the same reason placeholder_core._version excludes it."""
+    try:
+        value = getattr(obj, name)
+    except Exception:
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _resolve_mothers(recipes, open_files, into=None):
+    """{fileId: {'version': latest or None, 'name': resolved or ''}}, resolving
+    each mother exactly once. A kitchen has a handful of mothers, so one lookup
+    each is cheap; doing it per child would not be. ``into`` extends an existing
+    result so a second batch of recipes reuses what is already resolved.
+
+    The NAME matters as much as the version: a child built before the name fix
+    recorded the DOCUMENT name ('mother1 v16') rather than the file name, and
+    reading it from the file heals every such heading without a rebuild.
+    """
+    resolved = {} if into is None else into
+    for recipe in recipes:
+        file_id = recipe['mother']['fileId']
+        if not file_id or file_id in resolved:
+            continue
+        data_file = _resolve_mother_file(file_id, recipe.get('versionId'),
+                                        open_files)
+        resolved[file_id] = {
+            'version': _latest_version(data_file, file_id in open_files),
+            'name': _file_name(data_file)}
+    return resolved
 
 
 def survey_children(design):
@@ -1875,13 +2121,27 @@ def survey_children(design):
     """
     found, moved_out = find_children(design)
     slot_bodies = find_slot_bodies(design)
-    versions = _current_versions([recipe for _occ, recipe in found.values()])
+    # Scanned once and shared by every resolution below, so a layout with several
+    # mothers walks the open-document list a single time.
+    open_files = _open_datafiles()
+    mothers = _resolve_mothers([recipe for _occ, recipe in found.values()],
+                               open_files)
 
     rows = []
     for slot_id, (occurrence, recipe) in found.items():
         body = slot_bodies.get(slot_id)
-        current = versions.get(recipe['mother']['fileId'])
-        mother_found = current is not None
+        mother = mothers.get(recipe['mother']['fileId']) or {}
+        current = mother.get('version')
+        # NOT `current is not None`. A version we could not resolve is not a
+        # mother that does not exist, and conflating them reported every child
+        # as "mother not found" — which DISABLES its row, so the dialog became
+        # unusable rather than merely uninformative, and did so exactly when
+        # findFileById refused a valid lineage id. Since nothing here can prove
+        # a file is absent, only a recipe with no fileId at all is treated as
+        # missing; anything else gets a live row whose staleness reads
+        # "unknown version", and a rebuild that genuinely cannot find the
+        # mother reports it from _open_mother, where the truth is known.
+        mother_found = bool(recipe['mother']['fileId'])
         dims = matrix = None
         rotated = False
 
@@ -1890,7 +2150,8 @@ def survey_children(design):
                 live = list(occurrence.transform2.asArray())
                 frame = placeholder_core.frame_from_matrix(live)
                 vertices = _body_vertices(body)
-                rotated = not placeholder_core.is_axis_aligned(vertices, frame)
+                rotated = not placeholder_core.is_axis_aligned(
+                    _flat_face_normals(body), frame)
                 if not rotated:
                     width, depth, height, centre = placeholder_core.extents_in_frame(
                         vertices, frame)
@@ -1920,6 +2181,12 @@ def survey_children(design):
             'dims_cm': dims,
             'matrix': matrix,
             'name': occurrence.component.name,
+            # Both carried so the group heading is built from the MOTHER's own
+            # facts rather than from this row's staleness, which child_status
+            # suppresses whenever it returns early for a per-child problem —
+            # see placeholder_core.mother_heading_for_row.
+            'current_version': current,
+            'mother_name': mother.get('name', ''),
             'status': placeholder_core.child_status(
                 recipe, current, dims, moved, rotated,
                 mother_found, body is not None),
@@ -1944,6 +2211,8 @@ def survey_children(design):
                     moved_info[recipe['slotId']] = (recipe, attribute.parent.name)
             except Exception:
                 continue
+        _resolve_mothers([info[0] for info in moved_info.values()],
+                         open_files, into=mothers)
         for slot_id, message in moved_out.items():
             info = moved_info.get(slot_id)
             if not info:
@@ -1959,23 +2228,20 @@ def survey_children(design):
                 'status': dict(placeholder_core.child_status(
                     recipe, None, None, False, False, True, False),
                     problem=message),
+                # The mother's real facts, not blanks: this row's heading has to
+                # match its siblings' or it splits the group, and being moved out
+                # of the top level says nothing about its mother. Resolved just
+                # above, because a mother ALL of whose children sit in
+                # sub-assemblies is not in `found` and so was never looked up.
+                'current_version': (mothers.get(
+                    recipe['mother']['fileId']) or {}).get('version'),
+                'mother_name': (mothers.get(
+                    recipe['mother']['fileId']) or {}).get('name', ''),
             })
 
-    # The dialog's heading (_mother_heading) is per (mother, stored version):
-    # it always embeds the stored version verbatim, and re-emits whenever
-    # that text changes. Sorting on mother name alone leaves one mother's
-    # rows contiguous while their headings are not — fill six boxes off a
-    # mother, save it, fill three more, and headings would re-emit and
-    # alternate row by row instead of appearing once. Adding the stored
-    # version to the sort key makes each version a clean, contiguous
-    # subgroup, matching one heading per (mother, version) rather than per
-    # mother name alone. None (a version that was never resolved) must never
-    # be compared directly against an int — that raises TypeError in Python
-    # 3 — so it is keyed to sort after every real version instead.
-    def _version_key(version):
-        return (version is None, version if version is not None else 0)
-
-    rows.sort(key=lambda r: (r['recipe']['mother']['name'],
-                             _version_key(r['recipe']['mother']['version']),
-                             r['name']))
+    # Ordering and heading identity are one problem, so they live together in
+    # placeholder_core where they are tested: the dialog emits a heading only
+    # when mother_heading_key changes, so the sort MUST leave every group
+    # contiguous or a heading re-emits mid-group.
+    rows.sort(key=placeholder_core.mother_sort_key)
     return rows

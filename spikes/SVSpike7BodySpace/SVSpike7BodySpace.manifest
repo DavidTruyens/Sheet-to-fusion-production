@@ -1,0 +1,10 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "script",
+    "author": "David Truyens",
+    "description": {
+        "": "Measure whether a placeholder body is read in native or world coordinates, and which repair works."
+    },
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}
