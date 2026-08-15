@@ -12,6 +12,27 @@ body directly in the root component.
 
 ## Items
 
+> **First real use, 2026-08-15, on `Corpus v0` (add-in 1.18.0).** A four-variant
+> build came out with the drawer switched off on `Variant_1` and present on
+> `Variant_2`, `_3` and `_4`. That exercises the whole path end to end — sheet
+> column read, off-set resolved, bodies pruned, variants laid out — on a real
+> model rather than a purpose-built test one.
+>
+> The model is genuinely nested — `Corpus` holds `LeftCorpus`, `TopCorpus`,
+> `RighhtCorpus`, `BottomCorpus` and `BackCorpus`; `Drawer` holds `Component8`
+> through `Component11` — so switching `Drawer` off took its four children with
+> it. That is the subtree pruning of item 2, on a real assembly.
+>
+> The body counts come out exactly right: a drawer-on variant holds **9**
+> bodies — 5 from `Corpus` (`LeftCorpus`, `TopCorpus`, `RighhtCorpus`,
+> `BottomCorpus`, `BackCorpus`) and 4 from `Drawer` (`Component8`-`11`) — and a
+> drawer-off variant holds 5. Nothing is lost on the way through the walk. (An
+> earlier reading of a screenshot suggested the `Drawer` subtree contributed a
+> single body; that list was simply cut off by the image edge.)
+>
+> It is still not a pass of this checklist. Item 3 needs a component instanced
+> twice at the top level, which this model does not have.
+
 1. **The rewritten walk still collects what the old one did.** This is the
    branch's core backward-compatibility claim and the only part of it a test
    cannot reach. Build the nested test assembly from a sheet with the component
@@ -20,7 +41,14 @@ body directly in the root component.
    count and the same placement. A difference here means the recursion does not
    reach something `allOccurrences` did — a derived component, a flat pattern,
    or a linked sub-assembly.
-   - Result:
+   - Result: **the risk this item exists to catch is largely retired, but the
+     A/B was not run.** On `Corpus v0` (two levels, everything on) the walk
+     collected all 9 solid bodies — every body the model has — so the recursion
+     demonstrably reaches an ordinary nested assembly in full. What that does
+     not cover is the exotic cases in the sentence above: a derived component, a
+     flat pattern, a linked sub-assembly. None exist in this model, so if one
+     ever appears in a source model, run the A/B against `6922331` before
+     trusting the result.
 
 2. **Off removes the component and its subtree.** Build with `Carcass=FALSE`
    on one row. That variant contains no `Carcass`, no `Side_L`, no `Back`. The
@@ -47,13 +75,23 @@ body directly in the root component.
    components present, every light bulb in its original state, parameters back
    to their original expressions, and the document not marked modified beyond
    the usual parameter round-trip.
-   - Result:
+   - Result: **passes** (2026-08-15, `Corpus v0`, 1.18.0). The source model came
+     back unchanged after a build. This is the item the whole design rests on —
+     dropping bodies rather than suppressing occurrences is justified entirely
+     by the model being untouchable, and that now has evidence behind it rather
+     than an argument.
 
 7. **Check catches a bad sheet.** In turn: a column naming `Side_L` (error,
    "sub-component"); a column naming `Drawr` (error, no match); a cell reading
    `maybe` (error naming the cell); a blank toggle cell (warning, component
    stays in). The OK/Build button is disabled while any error stands.
-   - Result:
+   - Result: **sub-component case passes** (2026-08-15, `Corpus v0`, 1.18.0). A
+     `BackCorpus` column — a sub-component of `Corpus` — reported
+     `✗ 1 error(s), 0 warning(s) — fix before building` with
+     `Column "BackCorpus" is a sub-component — only top-level components can be
+     switched on or off.`, and the OK button was disabled, so the
+     errors-block-the-build clause holds too. The `Drawr`, `maybe` and
+     blank-cell cases are still to do.
 
 8. **KNOWN GAP — the Test tab preview does not honour toggles.** Previewing a
    row whose component is `FALSE` still shows that component, so the preview
