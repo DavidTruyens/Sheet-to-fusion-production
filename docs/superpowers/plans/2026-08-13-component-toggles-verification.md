@@ -23,14 +23,15 @@ body directly in the root component.
 > through `Component11` — so switching `Drawer` off took its four children with
 > it. That is the subtree pruning of item 2, on a real assembly.
 >
-> It is still not a pass of this checklist. Items 1, 4, 5, 6, 7 and 9 were not
-> attempted, and item 3 needs a component instanced twice at the top level,
-> which this model does not have. One thing to confirm while finishing item 2:
-> a drawer-off variant showed 5 bodies and a drawer-on variant showed 6, so the
-> whole `Drawer` subtree contributed a single body. If those four
-> sub-components each own a solid body, the on-variant should have shown 9 —
-> worth settling, because "fewer bodies than expected" is exactly the symptom
-> item 1 is looking for.
+> The body counts come out exactly right: a drawer-on variant holds **9**
+> bodies — 5 from `Corpus` (`LeftCorpus`, `TopCorpus`, `RighhtCorpus`,
+> `BottomCorpus`, `BackCorpus`) and 4 from `Drawer` (`Component8`-`11`) — and a
+> drawer-off variant holds 5. Nothing is lost on the way through the walk. (An
+> earlier reading of a screenshot suggested the `Drawer` subtree contributed a
+> single body; that list was simply cut off by the image edge.)
+>
+> It is still not a pass of this checklist. Item 3 needs a component instanced
+> twice at the top level, which this model does not have.
 
 1. **The rewritten walk still collects what the old one did.** This is the
    branch's core backward-compatibility claim and the only part of it a test
@@ -67,7 +68,11 @@ body directly in the root component.
    components present, every light bulb in its original state, parameters back
    to their original expressions, and the document not marked modified beyond
    the usual parameter round-trip.
-   - Result:
+   - Result: **passes** (2026-08-15, `Corpus v0`, 1.18.0). The source model came
+     back unchanged after a build. This is the item the whole design rests on —
+     dropping bodies rather than suppressing occurrences is justified entirely
+     by the model being untouchable, and that now has evidence behind it rather
+     than an argument.
 
 7. **Check catches a bad sheet.** In turn: a column naming `Side_L` (error,
    "sub-component"); a column naming `Drawr` (error, no match); a cell reading
