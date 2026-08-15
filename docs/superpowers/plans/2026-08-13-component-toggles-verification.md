@@ -73,7 +73,13 @@ body directly in the root component.
    "sub-component"); a column naming `Drawr` (error, no match); a cell reading
    `maybe` (error naming the cell); a blank toggle cell (warning, component
    stays in). The OK/Build button is disabled while any error stands.
-   - Result:
+   - Result: **sub-component case passes** (2026-08-15, `Corpus v0`, 1.18.0). A
+     `BackCorpus` column — a sub-component of `Corpus` — reported
+     `✗ 1 error(s), 0 warning(s) — fix before building` with
+     `Column "BackCorpus" is a sub-component — only top-level components can be
+     switched on or off.`, and the OK button was disabled, so the
+     errors-block-the-build clause holds too. The `Drawr`, `maybe` and
+     blank-cell cases are still to do.
 
 8. **KNOWN GAP — the Test tab preview does not honour toggles.** Previewing a
    row whose component is `FALSE` still shows that component, so the preview
