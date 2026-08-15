@@ -41,7 +41,14 @@ body directly in the root component.
    count and the same placement. A difference here means the recursion does not
    reach something `allOccurrences` did — a derived component, a flat pattern,
    or a linked sub-assembly.
-   - Result:
+   - Result: **the risk this item exists to catch is largely retired, but the
+     A/B was not run.** On `Corpus v0` (two levels, everything on) the walk
+     collected all 9 solid bodies — every body the model has — so the recursion
+     demonstrably reaches an ordinary nested assembly in full. What that does
+     not cover is the exotic cases in the sentence above: a derived component, a
+     flat pattern, a linked sub-assembly. None exist in this model, so if one
+     ever appears in a source model, run the A/B against `6922331` before
+     trusting the result.
 
 2. **Off removes the component and its subtree.** Build with `Carcass=FALSE`
    on one row. That variant contains no `Carcass`, no `Side_L`, no `Back`. The
