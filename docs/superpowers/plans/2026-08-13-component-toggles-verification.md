@@ -12,6 +12,17 @@ body directly in the root component.
 
 ## Items
 
+> **First real use, 2026-08-15, on `Corpus v0` (add-in 1.18.0).** A four-variant
+> build came out with the drawer switched off on `Variant_1` and present on
+> `Variant_2`, `_3` and `_4`. That exercises the whole path end to end — sheet
+> column read, off-set resolved, bodies pruned, variants laid out — on a real
+> model rather than a purpose-built test one.
+>
+> It is not a pass of this checklist. That model has both its components at the
+> top level with nothing nested beneath them, so the subtree pruning that item 2
+> exists to test was never reached, and items 1, 4, 5, 6, 7 and 9 were not
+> attempted. The items below are still open.
+
 1. **The rewritten walk still collects what the old one did.** This is the
    branch's core backward-compatibility claim and the only part of it a test
    cannot reach. Build the nested test assembly from a sheet with the component

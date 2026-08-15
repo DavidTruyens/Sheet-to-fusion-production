@@ -363,6 +363,12 @@ Nothing is written back to the sheet either way.
 
 Planned / ideas (also tracked in [`CHANGELOG.md`](CHANGELOG.md)):
 
+- **Export profiles per design** — profiles are currently stored in
+  `settings.json`, which is one file for the whole add-in, so the same output
+  sets follow you into every model. Open a different design and you inherit the
+  last one's profiles, with its components listed as `(missing)`. The sheet URL
+  already solves this: it is kept on the design itself, with the last-used value
+  only as a fallback. Profiles should work the same way.
 - **Sheet metal flat patterns** — build or export the flat pattern of sheet-metal
   components (e.g. as a dedicated output set) alongside the solid variants.
 - **Filter by thickness** — filter which variants or components are built/exported

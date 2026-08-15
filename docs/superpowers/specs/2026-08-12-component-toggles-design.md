@@ -279,8 +279,8 @@ In:
 - Toggle columns for top-level components, applied to every export profile.
 - Check-report classification, errors and warnings.
 - Skipped-variant reporting in the run summary.
-- **Deferred — not implemented on this branch.** See item 8 of the
-  verification checklist. Test tab preview honouring toggles.
+- Test tab preview honouring toggles. **Deferred — not implemented on this
+  branch;** see item 8 of the verification checklist.
 - Template generator emitting toggle columns.
 - README documentation of the sheet layout and the rules.
 

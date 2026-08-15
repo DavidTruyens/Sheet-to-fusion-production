@@ -4,6 +4,17 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
 
 ## Planned / ideas
 
+- **Export profiles per design.** Profiles and spacing live in `settings.json`,
+  one file for the whole add-in, so they are shared by every design you open —
+  the curtain board's `Named components` profile turns up in a kitchen carcass
+  with its component listed as `(missing)`. Found in first real use of the
+  component on/off columns. The sheet URL already does the right thing: stored
+  on the design as a document attribute, with the last-used value kept only as a
+  fallback for a design that has never been linked (`load_design_url` /
+  `save_design_url`). Profiles want the same shape. Two things to settle before
+  building it: whether a design with no stored profiles inherits the last-used
+  set or starts at just `Full model`, and what happens to the profiles already
+  sitting in everyone's `settings.json`.
 - **Sheet metal flat patterns** — build or export the flat pattern of sheet-metal
   components (e.g. as a dedicated output set) alongside the solid variants.
 - **Filter by thickness** — filter which variants or components are built/exported
