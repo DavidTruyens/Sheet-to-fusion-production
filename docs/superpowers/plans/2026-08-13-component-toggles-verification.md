@@ -18,10 +18,19 @@ body directly in the root component.
 > column read, off-set resolved, bodies pruned, variants laid out — on a real
 > model rather than a purpose-built test one.
 >
-> It is not a pass of this checklist. That model has both its components at the
-> top level with nothing nested beneath them, so the subtree pruning that item 2
-> exists to test was never reached, and items 1, 4, 5, 6, 7 and 9 were not
-> attempted. The items below are still open.
+> The model is genuinely nested — `Corpus` holds `LeftCorpus`, `TopCorpus`,
+> `RighhtCorpus`, `BottomCorpus` and `BackCorpus`; `Drawer` holds `Component8`
+> through `Component11` — so switching `Drawer` off took its four children with
+> it. That is the subtree pruning of item 2, on a real assembly.
+>
+> It is still not a pass of this checklist. Items 1, 4, 5, 6, 7 and 9 were not
+> attempted, and item 3 needs a component instanced twice at the top level,
+> which this model does not have. One thing to confirm while finishing item 2:
+> a drawer-off variant showed 5 bodies and a drawer-on variant showed 6, so the
+> whole `Drawer` subtree contributed a single body. If those four
+> sub-components each own a solid body, the on-variant should have shown 9 —
+> worth settling, because "fewer bodies than expected" is exactly the symptom
+> item 1 is looking for.
 
 1. **The rewritten walk still collects what the old one did.** This is the
    branch's core backward-compatibility claim and the only part of it a test
