@@ -42,6 +42,29 @@ sys.modules.pop('build_engine', None)
 import build_engine
 sys.modules.pop('placeholder_core', None)
 import placeholder_core
+# ...and THIS module needs the same treatment, for a subtler reason. Fusion RUNS
+# this file rather than importing it, so nothing ever put the running module
+# under the name "SheetVariants". placeholder_cmds imports it by that name at
+# call time (get_rows, iter_solid_bodies, the component-name helpers), and that
+# first import loaded a SECOND copy from disk and cached it — a copy no reload
+# has ever dropped, because every pop above names a helper and none names this
+# file. A session that first ran a pre-1.18.0 build therefore kept answering
+# with pre-1.18.0 functions indefinitely: get_rows resolved, while
+# top_level_component_names raised AttributeError on a machine whose files were
+# perfectly up to date. Publishing the LIVE module under that name makes the
+# cache current, and costs nothing when it already was.
+#
+# Guarded on _ADDIN_DIR rather than assuming __name__ is ours: if Fusion ever
+# executes this file without registering it as a module, sys.modules[__name__]
+# could be something else entirely, and publishing that would be far worse than
+# the stale copy. In that case drop the cached copy instead, so the next import
+# at least re-reads from disk.
+_live_module = sys.modules.get(__name__)
+if getattr(_live_module, '_ADDIN_DIR', None) == _ADDIN_DIR:
+    sys.modules['SheetVariants'] = _live_module
+else:
+    sys.modules.pop('SheetVariants', None)
+
 sys.modules.pop('placeholder_cmds', None)
 import placeholder_cmds
 
