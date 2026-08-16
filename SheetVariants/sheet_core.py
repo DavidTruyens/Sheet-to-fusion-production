@@ -413,6 +413,79 @@ def row_toggles(row, toggle_columns):
     return out
 
 
+def config_plan(header, row, model_name, param_names, top_level_names,
+                all_component_names=()):
+    """What one config row means for one model: values to drive, components to
+    leave out, and any reason to refuse.
+
+    Fill Placeholders and Update Children both need exactly this, and both used
+    to work it out themselves by checking every column against the model's
+    parameters. Only the Build Variants path learned about component columns, so
+    a column naming a component to switch off read as a parameter that does not
+    exist and aborted the whole run. Sharing one function is the point: the two
+    placeholder commands drifted apart precisely because the rule lived in three
+    places.
+
+    Returns ``errors`` rather than raising, so a caller that validates one child
+    among many can fail that child alone. Every problem is reported at once —
+    fixing a sheet one error per run is miserable.
+    """
+    cols = classify_columns(header, param_names, top_level_names,
+                            all_component_names)
+    errors = []
+
+    # classify_columns files a BLANK header under "unknown" alongside a typo,
+    # which is right for the Build dialog's Check (it reports one column at a
+    # time and can say "column F has no header"). Joined into one message here
+    # it would read "...in "mother1": " and name nothing. Worse, read_tab_rows
+    # pads every row out to the tab's widest column, so a stray note beside the
+    # table gives the header row trailing blanks — which would abort sheets that
+    # have no component columns at all and worked perfectly before. So an empty
+    # column is ignored, and a blank header is only reported when this row
+    # actually has data under it, named by its spreadsheet letter.
+    named_unknown = [name for name in cols["unknown"] if name]
+    if named_unknown:
+        errors.append('These columns do not match any parameter or top-level '
+                      'component in "{}": {}'.format(
+                          model_name, ", ".join(named_unknown)))
+    headless = [_cell_ref(index, "")
+                for index, raw in enumerate(header or [])
+                if index > 0 and not (raw or "").strip()
+                and index < len(row or []) and (row[index] or "").strip()]
+    if headless:
+        errors.append('These columns in "{}" have data but no header: {}'.format(
+            model_name, ", ".join(headless)))
+
+    if cols["sub_components"]:
+        errors.append('These columns name sub-components of "{}", which cannot '
+                      'be switched on or off: {}'.format(
+                          model_name, ", ".join(cols["sub_components"])))
+
+    # row_toggles collapses parse_toggle's three-valued answer to two, keeping
+    # the component on whatever the cell says. Its docstring justifies that with
+    # "validate_mapping blocks the build before a build can ever see one" — true
+    # of the Build dialog, false here: nothing validates a sheet before Fill
+    # Placeholders or Update Children read it. So the cells are re-read for the
+    # one case that matters. A typo silently meaning "keep" would build a child
+    # WITH a part the designer switched off and report it as a success, which is
+    # exactly the "looks accepted, does nothing" outcome this whole change set
+    # exists to remove.
+    unreadable = ['{} ("{}")'.format(name, (row[index] if index < len(row) else ""))
+                  for index, name in cols["toggles"]
+                  if parse_toggle(row[index] if index < len(row) else "") is None]
+    if unreadable:
+        errors.append('These on/off cells in "{}" are not yes/no values: {}'
+                      .format(model_name, ", ".join(unreadable)))
+
+    values = {name: (row[index].strip() if index < len(row) else "")
+              for index, name in cols["parameters"]}
+    toggles = row_toggles(row, cols["toggles"])
+    return {"values": values,
+            "off_names": sorted(n for n, keep in toggles.items() if not keep),
+            "errors": errors,
+            "collisions": cols["collisions"]}
+
+
 def _cell_ref(col_index, row_number):
     letters = ""
     n = col_index + 1

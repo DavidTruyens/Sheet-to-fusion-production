@@ -608,3 +608,139 @@ def test_summarize_unchanged_without_skipped_variants():
     results = [{"name": "Full model", "built": 3}]
     assert sheet_core.summarize_results(results) == (
         "Built:\n  • Full model (3 variant(s))")
+
+
+# --- config_plan: one config row read against one mother ----------------------
+# Fill Placeholders and Update Children both need "what does this row mean for
+# THIS mother" — parameter values, components to leave out, and any reason to
+# refuse. They validated it separately before, and only one of the two learned
+# about component columns, so a toggle column aborted every fill.
+
+def test_config_plan_separates_values_from_toggles():
+    plan = sheet_core.config_plan(
+        header=["Name", "Width", "Drawer"], row=["Variant_2", "600", "no"],
+        model_name="Corpus", param_names=["Width"], top_level_names=["Drawer"])
+    assert plan["values"] == {"Width": "600"}
+    assert plan["off_names"] == ["Drawer"]
+    assert plan["errors"] == []
+
+
+def test_config_plan_keeps_a_component_that_is_switched_on():
+    plan = sheet_core.config_plan(
+        header=["Name", "Drawer"], row=["V", "yes"],
+        model_name="Corpus", param_names=[], top_level_names=["Drawer"])
+    assert plan["off_names"] == []
+
+
+def test_config_plan_rejects_a_column_matching_nothing():
+    plan = sheet_core.config_plan(
+        header=["Name", "Widht"], row=["V", "600"],
+        model_name="Corpus", param_names=["Width"], top_level_names=[])
+    assert plan["errors"] == ['These columns do not match any parameter or '
+                              'top-level component in "Corpus": Widht']
+
+
+def test_config_plan_rejects_a_sub_component_column_with_its_own_advice():
+    # A different problem from a typo, so a different message: this one names a
+    # real component that simply cannot be switched off.
+    plan = sheet_core.config_plan(
+        header=["Name", "Runner"], row=["V", "no"],
+        model_name="Corpus", param_names=[], top_level_names=["Drawer"],
+        all_component_names=["Drawer", "Runner"])
+    assert plan["errors"] == ['These columns name sub-components of "Corpus", '
+                              'which cannot be switched on or off: Runner']
+
+
+def test_config_plan_reports_every_problem_at_once():
+    plan = sheet_core.config_plan(
+        header=["Name", "Widht", "Runner"], row=["V", "1", "no"],
+        model_name="Corpus", param_names=[], top_level_names=[], all_component_names=["Runner"])
+    assert len(plan["errors"]) == 2
+
+
+def test_config_plan_reads_a_parameter_that_shares_a_component_name():
+    # classify_columns gives a parameter precedence over a component of the same
+    # name so no sheet changes meaning; config_plan must not undo that.
+    plan = sheet_core.config_plan(
+        header=["Name", "Drawer"], row=["V", "600"],
+        model_name="Corpus", param_names=["Drawer"], top_level_names=["Drawer"])
+    assert plan["values"] == {"Drawer": "600"}
+    assert plan["off_names"] == []
+
+
+def test_config_plan_treats_a_short_row_as_blank():
+    # A spreadsheet often omits trailing empty cells entirely.
+    plan = sheet_core.config_plan(
+        header=["Name", "Width", "Drawer"], row=["V"],
+        model_name="Corpus", param_names=["Width"], top_level_names=["Drawer"])
+    assert plan["values"] == {"Width": ""}
+    assert plan["off_names"] == []
+
+
+def test_config_plan_rejects_a_toggle_cell_that_is_neither_yes_nor_no():
+    # parse_toggle keeps None distinct from False precisely because a typo that
+    # silently meant "off" is invisible in the output — a missing part looks
+    # exactly like a part you meant to remove. row_toggles collapses that None
+    # to True on the grounds that validate_mapping blocked it earlier, but the
+    # placeholder commands have no such gate in front of them, so config_plan
+    # has to be the one that refuses.
+    plan = sheet_core.config_plan(
+        header=["Name", "Drawer"], row=["V", "FLASE"],
+        model_name="Corpus", param_names=[], top_level_names=["Drawer"])
+    assert plan["errors"] == ['These on/off cells in "Corpus" are not yes/no '
+                              'values: Drawer ("FLASE")']
+    assert plan["off_names"] == []
+
+
+def test_config_plan_accepts_the_documented_toggle_spellings():
+    for text in ("no", "FALSE", "0", "off"):
+        plan = sheet_core.config_plan(
+            header=["Name", "Drawer"], row=["V", text],
+            model_name="C", param_names=[], top_level_names=["Drawer"])
+        assert plan["errors"] == [], text
+        assert plan["off_names"] == ["Drawer"], text
+
+
+def test_config_plan_treats_a_blank_toggle_cell_as_on():
+    plan = sheet_core.config_plan(
+        header=["Name", "Drawer"], row=["V", ""],
+        model_name="C", param_names=[], top_level_names=["Drawer"])
+    assert plan["errors"] == []
+    assert plan["off_names"] == []
+
+
+def test_config_plan_ignores_a_blank_header_over_an_empty_column():
+    # THE REGRESSION: read_tab_rows pads every row out to the tab's widest, so a
+    # stray note to the right of the table gives the header row trailing blanks.
+    # classify_columns files those under "unknown", which would abort the run
+    # with a message naming nothing at all — and would do it to sheets that have
+    # no component columns and worked fine before. An empty column is not a
+    # problem to report.
+    plan = sheet_core.config_plan(
+        header=["Name", "Width", "", ""], row=["V", "600", "", ""],
+        model_name="C", param_names=["Width"], top_level_names=[])
+    assert plan["errors"] == []
+    assert plan["values"] == {"Width": "600"}
+
+
+def test_config_plan_reports_a_blank_header_that_has_data_under_it():
+    # Still worth reporting: a column you filled in that quietly does nothing is
+    # invisible in the output. Named by its spreadsheet letter, since it has no
+    # header to name it by.
+    plan = sheet_core.config_plan(
+        header=["Name", "Width", ""], row=["V", "600", "900"],
+        model_name="C", param_names=["Width"], top_level_names=[])
+    assert plan["errors"] == ['These columns in "C" have data but no header: C']
+
+
+def test_config_plan_never_emits_an_error_naming_nothing():
+    # Whatever the shape, an error must name the thing it is complaining about.
+    for header, row in ((["Name", ""], ["V", ""]),
+                        (["Name", "", ""], ["V", "x", ""]),
+                        (["Name", "Widht"], ["V", "1"]),
+                        (["Name"], ["V"])):
+        for message in sheet_core.config_plan(
+                header=header, row=row, model_name="C",
+                param_names=[], top_level_names=[])["errors"]:
+            assert not message.rstrip().endswith(":"), message
+            assert ": ," not in message, message

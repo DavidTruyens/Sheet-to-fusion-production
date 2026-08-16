@@ -15,6 +15,7 @@ Ordered by value. **Items 1–3 decide whether the feature is trustworthy** — 
 | 1 | Null test | ⚠️ **partial** — no false `moved`/`resized`, but boxes were at ROOT |
 | 2 | Two-mother run | ⬜ not run — only one mother in the test layout |
 | 3 | Core loop | ✅ **pass** |
+| 3c | Component on/off via placeholder | ⬜ **not run** — new in 1.18.1 |
 | 4 | Hand-made cut | ⬜ not run |
 | 5 | Move a box | ⬜ not run |
 | 6 | Resize a box | ⬜ not run |
@@ -113,6 +114,31 @@ Change a parameter in mother A, **save** it, close it. Run **Update Children**.
   `out of date` (if so, check whether you have mother A open at an *older* version
   than the cloud's latest — the survey reads the data panel while the rebuild
   records the open document's version, and those disagree in that case).
+
+## 3c. Component on/off columns through a placeholder *(new in 1.18.1)*
+
+Use a mother whose sheet has a component column (e.g. `Drawer`), on a config that
+switches it **off**.
+
+- **PASS** — Fill Placeholders accepts the sheet (no "columns do not match any
+  parameter" error), and the child is built **without** that component and
+  without anything nested beneath it. A config that leaves it **on** builds with
+  it. Update Children rebuilds the same way.
+- **FAIL** — the run aborts naming the component as an unmatched column (the
+  1.18.0 bug), or it builds successfully **with** the component still present,
+  which is the worse outcome: the column looks accepted and does nothing.
+
+**Then rebuild a child that already existed**, from a config with no toggles at
+all. `_snapshot_for` now collects bodies through `SheetVariants.iter_solid_bodies`
+— a recursive walk down from `root.occurrences` — where it used to use a flat
+`allOccurrences` pass. Body ORDER can therefore differ. `pair_bodies` matches by
+name so a rebuild should be unaffected, but that is reasoning, not measurement.
+
+- **PASS** — the rebuilt child looks right and its materials/appearances are on
+  the bodies they belong to.
+- **FAIL** — a body wears a sibling's appearance. That is the positional-pairing
+  trap `resulting_snap_order` exists to prevent, resurfacing through a changed
+  walk order.
 
 ## 4. The hand-made cut
 

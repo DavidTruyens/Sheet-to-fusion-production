@@ -4,6 +4,15 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
 
 ## Planned / ideas
 
+- **One column-classification path.** `sheet_core.config_plan` now backs Fill
+  Placeholders and Update Children; `build_exports` still classifies and reads
+  its rows itself (`SheetVariants.py`). Two copies of the rule is one better than
+  three, but it is the same divergence that let component on/off columns work in
+  Build Variants and abort every fill. The copies already differ slightly:
+  `build_exports` drops blank parameter cells, `config_plan` keeps them as `""`
+  (harmless — `apply_values` skips blanks — but exactly the sort of difference
+  that caused this).
+
 - **Export profiles per design.** Profiles and spacing live in `settings.json`,
   one file for the whole add-in, so they are shared by every design you open —
   the curtain board's `Named components` profile turns up in a kitchen carcass
@@ -47,6 +56,42 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
 - **Known gap:** the Test tab preview does **not** yet honour toggles.
   Previewing a row still shows every component regardless of its `FALSE`
   cells; only the preview is wrong — a build itself applies toggles correctly.
+
+## 1.18.1 — Component on/off columns work for placeholders too
+
+- **A component on/off column no longer aborts Fill Placeholders.** 1.18.0 taught
+  the Build Variants path that a column can name a component to switch off, but
+  the two placeholder commands still checked every column against the mother's
+  parameters — so a sheet using the feature failed with *"These columns do not
+  match any parameter"* naming the component. **Fill Placeholders** and **Update
+  Children** now classify columns exactly as Build Variants does, and a column
+  naming a sub-component gets its own message rather than being called a typo.
+- **And the switch actually takes effect**: a child is built without the
+  components its config switches off, pruned with the whole subtree beneath them,
+  through the same walk the Build Variants path uses. Validating the column
+  without applying it would have been worse than the error it replaced — the
+  column would have looked accepted and done nothing.
+- **A toggle cell that is neither yes nor no is refused**, naming the cell.
+  `parse_toggle` keeps "unreadable" distinct from "off" precisely because a typo
+  that silently meant *off* is invisible — a missing part looks exactly like a
+  part you meant to remove — but the placeholder commands have no Check step in
+  front of them, so they now do that refusing themselves.
+- A column with data but **no header** is reported by its spreadsheet letter
+  rather than by nothing, and an entirely empty column is ignored. Sheets are
+  padded out to their widest column, so a stray note beside the table gave the
+  header row trailing blanks.
+- The two placeholder commands now share one implementation of "what does this
+  row mean for this model" (`sheet_core.config_plan`); they drifted apart in the
+  first place because the rule was written out separately in each. **Build
+  Variants still has its own copy** — it works, and rewiring a path that ships
+  and is in daily use was not worth the risk in the same change that fixes the
+  bug. Folding it in is the obvious follow-up.
+
+**Known limitation, unchanged:** editing a config in the sheet — a value or a
+toggle — does not mark existing children out of date. Staleness compares the
+mother's *version*, and a child records its config's **name**, not its contents.
+Re-run Fill Placeholders on those boxes to pick up a sheet edit. This was already
+true for parameter values; component columns make it much easier to hit.
 
 ## 1.17.2 — Update Children fixes from first real use
 

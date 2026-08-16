@@ -20,6 +20,9 @@ if _ADDIN_DIR not in sys.path:
     sys.path.insert(0, _ADDIN_DIR)
 sys.modules.pop('placeholder_core', None)
 import placeholder_core
+# Safe at module level: SheetVariants.py pops and re-imports sheet_core before it
+# pops and re-imports THIS module, so an add-in reload never binds a stale one.
+import sheet_core
 
 app = adsk.core.Application.get()
 ui = app.userInterface
@@ -585,7 +588,7 @@ class FillExecuteHandler(adsk.core.CommandEventHandler):
             # means "drive only width/depth/height from the box and leave every
             # other parameter at the mother's current value". The OTHER dashed
             # labels ("press Load configs", "no named rows") ARE unset states
-            # and must not reach _row_values as a config name (I3).
+            # and must not reach _row_cells as a config name (I3).
             if label == NO_CONFIG_LABEL:
                 config = ''
             elif label.startswith('—'):
@@ -962,14 +965,29 @@ def _unique_component_name(root, wanted):
     return '{}_{}'.format(wanted, index)
 
 
-def _row_values(rows, config):
-    """{parameter name: cell} for the row whose Name column is ``config``."""
+def _row_cells(rows, config):
+    """(header, row) for the variant named ``config``.
+
+    The whole row is carried rather than a {name: value} map, because what a
+    column MEANS depends on the mother — a header can be a parameter or a
+    component to switch off — and the mother is not open yet at the point this
+    is read. sheet_core.config_plan decides that once the mother is active.
+    """
     header = [h.strip() for h in rows[0]]
     for row in rows[1:]:
         if (row[0] or '').strip() == config:
-            return {name: (row[i].strip() if i < len(row) else '')
-                    for i, name in enumerate(header) if i > 0 and name}
+            return header, row
     raise RuntimeError('Config "{}" is no longer in the sheet.'.format(config))
+
+
+def _plan_for(header, row, model_name, design):
+    """sheet_core.config_plan against the mother that is open RIGHT NOW."""
+    import SheetVariants
+    return sheet_core.config_plan(
+        header, row, model_name,
+        SheetVariants.known_param_names(design),
+        SheetVariants.top_level_component_names(design),
+        SheetVariants.component_names(design))
 
 
 def _cm(value):
@@ -1084,7 +1102,7 @@ def _open_mother(file_id, require_latest=False):
     return app.documents.open(data_file), True
 
 
-def _snapshot_for(setup, values, dims_cm, unrestored_names):
+def _snapshot_for(setup, values, dims_cm, unrestored_names, off_names=()):
     """Drive the mother to one config-and-size and snapshot its solids, already
     transformed into the child's local space with the anchor at the origin.
 
@@ -1094,6 +1112,10 @@ def _snapshot_for(setup, values, dims_cm, unrestored_names):
     recomputes, which is exactly what build_engine._design()'s docstring
     warns can invalidate a held collection. The anchor read further down,
     after apply_values(), already re-derives its own fresh handle too.
+
+    ``off_names`` are top-level components this variant switches off. They are
+    not collected, exactly as the Build Variants path does it — the mother is
+    never modified, so nothing has to be switched back on afterwards.
 
     ``unrestored_names`` is a ``set`` the caller owns across the whole run:
     any parameter this call could not restore is added to it here rather than
@@ -1128,11 +1150,14 @@ def _snapshot_for(setup, values, dims_cm, unrestored_names):
         # The anchor moves with the model, so read it AFTER the recompute.
         point = fresh.rootComponent.jointOrgins.itemByName(
             setup['anchor']).geometry.origin
-        bodies = []
-        for occurrence in fresh.rootComponent.allOccurrences:
-            bodies.extend(b for b in occurrence.bRepBodies if b.isSolid)
-        bodies.extend(b for b in fresh.rootComponent.bRepBodies if b.isSolid)
-        snaps = build_engine.snapshot_bodies(bodies)
+        # SheetVariants' own walk, not a second one here: it descends from
+        # root.occurrences so a switched-off component takes its whole SUBTREE
+        # with it, which a flat allOccurrences pass followed by a name filter
+        # cannot do. It also yields assembly-context proxies, i.e. world
+        # positions, which is what the transform below expects.
+        import SheetVariants
+        snaps = build_engine.snapshot_bodies(
+            list(SheetVariants.iter_solid_bodies(fresh, off_names)))
     finally:
         build_engine.restore_values(original)
         try:
@@ -1179,13 +1204,16 @@ def build_children(slots, mother, config):
     import SheetVariants
     if config:
         rows_url, rows_tab = mother['sheetUrl'], mother['tab'] or None
-        values = _row_values(SheetVariants.get_rows(rows_url, rows_tab), config)
+        header, row_cells = _row_cells(
+            SheetVariants.get_rows(rows_url, rows_tab), config)
     else:
         # Size-only: the box drives width/depth/height and every other parameter
         # keeps the mother's current value. No sheet is read, so a mother that
         # has never been linked to one is perfectly usable this way.
         rows_url, rows_tab = '', ''
-        values = {}
+        header, row_cells = [], []
+    values = {}
+    off_names = []
 
     # Stamp slot ids NOW, while the layout is still active and Phase 0's body
     # references are still alive. Opening the mother below invalidates every live
@@ -1257,13 +1285,16 @@ def build_children(slots, mother, config):
             # A renamed or deleted mother parameter must fail loudly up front,
             # matching build_exports' own check — not silently build a
             # wrongly-sized or wrongly-configured child that reads as a success.
-            missing_columns = sorted(
-                name for name in values
-                if not mother_design.allParameters.itemByName(name))
-            if missing_columns:
-                raise RuntimeError(
-                    'These columns do not match any parameter in "{}": {}'
-                    .format(mother['name'], ', '.join(missing_columns)))
+            # Classified against the mother rather than checked against its
+            # parameters alone: a column naming a top-level component switches
+            # that component OFF for this variant, and reading one as a missing
+            # parameter aborted every fill whose sheet used the feature.
+            if config:
+                plan = _plan_for(header, row_cells, mother['name'], mother_design)
+                if plan['errors']:
+                    raise RuntimeError('\n'.join(plan['errors']))
+                values = plan['values']
+                off_names = plan['off_names']
 
             # One drive per DISTINCT size: a run of identical units costs one
             # recompute. A cancel stops driving further sizes but does not raise
@@ -1277,7 +1308,7 @@ def build_children(slots, mother, config):
                 if key not in by_size:
                     try:
                         by_size[key] = _snapshot_for(setup, values, slot['dims_cm'],
-                                                     unrestored_names)
+                                                     unrestored_names, off_names)
                     except Exception as err:
                         # One unusable slot must not cost the whole run.
                         failures.append('{} — {}'.format(slot['name'], err))
@@ -1526,7 +1557,7 @@ def _exc_text(err):
     message-carrying RuntimeErrors this add-in usually raises. The type name
     substitutes ONLY when str(err) is blank — every other exception-to-report
     site in this module prints the bare message, and a carefully worded
-    RuntimeError (e.g. one of _row_values' own) should keep reading that way
+    RuntimeError (e.g. one of _row_cells' own) should keep reading that way
     rather than gaining a needless 'RuntimeError: ' prefix."""
     text = str(err)
     return text if text else type(err).__name__
@@ -1722,10 +1753,12 @@ def update_children(rows):
                                     if cache_key not in sheet_cache:
                                         sheet_cache[cache_key] = SheetVariants.get_rows(
                                             cache_key[0], cache_key[1])
-                                    values = _row_values(sheet_cache[cache_key],
-                                                         recipe['config'])
+                                    header, row_cells = _row_cells(
+                                        sheet_cache[cache_key], recipe['config'])
                                 else:
-                                    values = {}
+                                    header, row_cells = [], []
+                                values = {}
+                                off_names = []
                                 # A renamed or deleted mother parameter must
                                 # fail loudly here, per child, exactly as
                                 # build_children fails loudly up front for its
@@ -1751,16 +1784,23 @@ def update_children(rows):
                                 # too (see failed_keys).
                                 current_design = adsk.fusion.Design.cast(
                                     app.activeProduct)
-                                missing_columns = sorted(
-                                    name for name in values
-                                    if not current_design.allParameters.itemByName(name))
-                                if missing_columns:
-                                    raise RuntimeError(
-                                        'these columns do not match any parameter '
-                                        'in "{}": {}'.format(
-                                            mother_name, ', '.join(missing_columns)))
+                                # Classified against the mother, not checked
+                                # against its parameters alone: a column naming
+                                # a top-level component switches it off for this
+                                # variant, and reading one as a missing
+                                # parameter failed every child whose sheet used
+                                # the feature — see build_children's twin check.
+                                if recipe['config']:
+                                    plan = _plan_for(header, row_cells,
+                                                     mother_name, current_design)
+                                    if plan['errors']:
+                                        raise RuntimeError(
+                                            '; '.join(plan['errors']))
+                                    values = plan['values']
+                                    off_names = plan['off_names']
                                 snapshots[key] = _snapshot_for(
-                                    setup, values, row['dims_cm'], mother_unrestored)
+                                    setup, values, row['dims_cm'],
+                                    mother_unrestored, off_names)
                                 drove_ok = True
                         except Exception as err:
                             # One unusable child must not cost the whole run.
