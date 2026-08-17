@@ -57,6 +57,23 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
   Previewing a row still shows every component regardless of its `FALSE`
   cells; only the preview is wrong — a build itself applies toggles correctly.
 
+## 1.18.2 — The add-in stops answering with last week's code
+
+- **Reloading the add-in now refreshes `SheetVariants.py` itself.** Every helper
+  module is dropped from Python's cache before it is re-imported, precisely so a
+  reload picks up the current file — but the main file was never on that list,
+  because Fusion *runs* it rather than importing it. The first time
+  `placeholder_cmds` imported it by name it loaded a **second copy from disk and
+  cached that**, and no reload has ever dropped it. A Fusion session that first
+  ran a pre-1.18.0 build kept calling pre-1.18.0 functions for as long as it
+  stayed open, on a machine whose files were completely up to date.
+- The symptom was **Fill Placeholders failing with
+  `module 'SheetVariants' has no attribute 'top_level_component_names'`** on
+  1.18.1, where `get_rows` — a function old enough to be in the stale copy —
+  resolved fine two lines earlier. Anything else that reached for a newly added
+  function would have hit the same wall.
+- Restarting Fusion was the workaround. It is no longer needed.
+
 ## 1.18.1 — Component on/off columns work for placeholders too
 
 - **A component on/off column no longer aborts Fill Placeholders.** 1.18.0 taught
