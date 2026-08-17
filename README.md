@@ -37,7 +37,10 @@ parameters, so the column names always match.
 - **Test tab** — pick one sheet row to preview it live on the open model so you
   can eyeball it; the model reverts when you close the dialog.
 - **Materials & appearances** — built variants keep the source model's materials
-  and body appearances, so each export looks like the original instead of flat grey.
+  and appearances, so each export looks like the original instead of flat grey.
+  A colour assigned to a component or an occurrence counts, not only one set
+  directly on a body: the body's own override wins where it has one, otherwise
+  the nearest thing above it that does.
 - No Google Cloud project or API key: multi-tab sheets are fetched once as an
   XLSX workbook and parsed with the standard library (`zipfile`); single-tab
   and published-to-web links are still read as CSV.

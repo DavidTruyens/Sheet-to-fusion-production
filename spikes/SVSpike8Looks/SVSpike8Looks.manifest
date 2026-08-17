@@ -1,0 +1,10 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "script",
+    "author": "David Truyens",
+    "description": {
+        "": "Report where a mother's colour lives: on the body, the occurrence, or the component."
+    },
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}

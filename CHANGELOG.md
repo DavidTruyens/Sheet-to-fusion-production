@@ -57,6 +57,22 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
   Previewing a row still shows every component regardless of its `FALSE`
   cells; only the preview is wrong — a build itself applies toggles correctly.
 
+## 1.18.3 — Colours applied above the body come through
+
+- **A colour assigned to a component or an occurrence is now copied onto the
+  child.** Only a body's own appearance *override* was read, so colouring a model
+  the quick way — select the component, assign an appearance — left nothing to
+  copy and every child was built plain. Both **Fill Placeholders** and
+  **Build Variants** pick it up, since they share the same snapshot step.
+- The chain follows Fusion's own precedence: the body's override wins, then the
+  nearest enclosing occurrence, then the component's material. A body that
+  already carried its own override resolves exactly as before, so nothing that
+  worked can change.
+- Applying a captured look now tests whether it is *set* rather than whether it
+  is truthy, in both directions. A Fusion object that happened to be falsy would
+  have been skipped and the body left default — the same shape of bug as the one
+  above.
+
 ## 1.18.2 — The add-in stops answering with last week's code
 
 - **Reloading the add-in now refreshes `SheetVariants.py` itself.** Every helper

@@ -1032,3 +1032,47 @@ def test_sorting_leaves_every_heading_group_contiguous():
             assert key not in seen, "group {} re-emitted".format(key)
             seen.add(key)
             previous = key
+
+
+# --- inherited_look: a colour applied above the body still gets copied --------
+
+class _Look:
+    """Stands in for a Fusion Appearance/Material. Deliberately FALSY, to prove
+    the resolver tests for 'is set' rather than truthiness — a real object that
+    happened to be falsy would otherwise be skipped and read as no colour."""
+    def __init__(self, name):
+        self.name = name
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return "_Look({!r})".format(self.name)
+
+
+def test_inherited_look_prefers_the_bodys_own_override():
+    body, occurrence = _Look("body"), _Look("occ")
+    assert pc.inherited_look([body, occurrence]) is body
+
+
+def test_inherited_look_falls_back_to_the_enclosing_occurrence():
+    occurrence = _Look("occ")
+    assert pc.inherited_look([None, occurrence]) is occurrence
+
+
+def test_inherited_look_takes_the_nearest_of_several_ancestors():
+    near, far = _Look("near"), _Look("far")
+    assert pc.inherited_look([None, near, far]) is near
+
+
+def test_inherited_look_is_none_when_nothing_is_set():
+    assert pc.inherited_look([None, None, None]) is None
+    assert pc.inherited_look([]) is None
+
+
+def test_inherited_look_returns_a_falsy_look_rather_than_skipping_it():
+    # THE TRAP: `if candidate:` instead of `is not None` would walk straight past
+    # a real appearance and report the body as having no colour.
+    falsy = _Look("set-but-falsy")
+    assert bool(falsy) is False
+    assert pc.inherited_look([falsy, _Look("outer")]) is falsy
