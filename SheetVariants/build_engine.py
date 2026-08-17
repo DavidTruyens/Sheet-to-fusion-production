@@ -142,10 +142,59 @@ def unrestored_values(values):
     return bad
 
 
+def _get(obj, attribute):
+    """One property, or None if it is unset OR will not read. Both mean "nothing
+    to copy from here", and the caller carries on up the chain either way."""
+    try:
+        return getattr(obj, attribute)
+    except Exception:
+        return None
+
+
+def _occurrence_chain(body):
+    """The occurrences enclosing ``body``, nearest first.
+
+    Empty for a body owned by the root component — it sits in no occurrence, so
+    there is nothing above it to inherit from. Bounded rather than `while True`:
+    a malformed assemblyContext cycle would otherwise hang the add-in, and no
+    real assembly is anywhere near this deep.
+    """
+    chain = []
+    occurrence = _get(body, 'assemblyContext')
+    while occurrence is not None and len(chain) < 64:
+        chain.append(occurrence)
+        occurrence = _get(occurrence, 'assemblyContext')
+    return chain
+
+
+def effective_appearance(body):
+    """The appearance the body actually SHOWS, not merely its own override.
+
+    Reading only body.appearance meant a colour applied to a component or an
+    occurrence — the quickest way to colour a model — had nothing to copy, and
+    children came out plain. The chain follows Fusion's own precedence, and
+    because inherited_look returns the FIRST value that is set, a body carrying
+    its own override resolves exactly as it always did.
+    """
+    return placeholder_core.inherited_look(
+        [_get(body, 'appearance')]
+        + [_get(occurrence, 'appearance') for occurrence in _occurrence_chain(body)])
+
+
+def effective_material(body):
+    """The material the body actually shows. Same idea as effective_appearance,
+    one link shorter: a material comes from the body or from the component that
+    owns it, and occurrences do not override it."""
+    return placeholder_core.inherited_look(
+        [_get(body, 'material'), _get(_get(body, 'parentComponent'), 'material')])
+
+
 def snapshot_bodies(bodies):
-    """Copy each body to a temporary BRep, keeping its qualified name and its
-    body-level appearance override and material. Bodies that cannot be copied are
-    skipped rather than failing the run."""
+    """Copy each body to a temporary BRep, keeping its qualified name and the
+    appearance and material it actually SHOWS — its own override where it has
+    one, otherwise whatever it inherits from an enclosing occurrence or its
+    component. Bodies that cannot be copied are skipped rather than failing the
+    run."""
     tbm = adsk.fusion.TemporaryBRepManager.get()
     snaps = []
     for body in bodies:
@@ -153,16 +202,9 @@ def snapshot_bodies(bodies):
             temp = tbm.copy(body)
         except Exception:
             continue
-        appearance = material = None
         component_name = body_name = ''
-        try:
-            appearance = body.appearance
-        except Exception:
-            pass
-        try:
-            material = body.material
-        except Exception:
-            pass
+        appearance = effective_appearance(body)
+        material = effective_material(body)
         try:
             component_name = body.parentComponent.name
         except Exception:
@@ -237,13 +279,16 @@ def reapply_looks(design, component, snaps):
             break
         body = bodies.item(index)
         try:
-            if snap['material']:
+            # `is not None`, not truthiness: a Fusion object that happened to
+            # be falsy would be silently skipped and the body left default —
+            # see placeholder_core.inherited_look, which avoids the same trap.
+            if snap['material'] is not None:
                 material = material_in(design, snap['material'])
-                if material:
+                if material is not None:
                     body.material = material
-            if snap['appearance']:
+            if snap['appearance'] is not None:
                 appearance = appearance_in(design, snap['appearance'])
-                if appearance:
+                if appearance is not None:
                     body.appearance = appearance
         except Exception:
             pass  # geometry is built; a failed look just stays default

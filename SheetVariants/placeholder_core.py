@@ -501,6 +501,31 @@ def child_status(recipe, current_version, box_dims_cm, moved, rotated,
     return status
 
 
+def inherited_look(candidates):
+    """The first appearance or material that is actually SET, walking outward
+    from the body.
+
+    Fusion decides what you see by precedence: a body's own override wins;
+    failing that, the nearest enclosing occurrence that overrides it; failing
+    that, the component's material. snapshot_bodies used to read only the first
+    of those, so a colour applied at any higher level — which is the quickest way
+    to work, and therefore the common one — had nothing to copy and the child was
+    built plain.
+
+    Ordering is the caller's job: pass candidates NEAREST-FIRST. Returning the
+    first set entry rather than the last is what keeps a body's own override
+    authoritative, so a model that already came through correctly cannot change.
+
+    Tests for ``is not None``, never truthiness. A Fusion object that happened to
+    be falsy would otherwise be walked straight past and reported as no colour —
+    the same class of bug as the one this function exists to fix.
+    """
+    for candidate in candidates or ():
+        if candidate is not None:
+            return candidate
+    return None
+
+
 def mother_heading(name, stored_version, current_version, found=True):
     """The bold group heading above one mother's children.
 
