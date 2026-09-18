@@ -67,6 +67,10 @@ else:
 
 sys.modules.pop('placeholder_cmds', None)
 import placeholder_cmds
+# cutlist_cmd drops and re-imports cutlist_core itself, the way placeholder_cmds
+# does for placeholder_core, so only the command module is named here.
+sys.modules.pop('cutlist_cmd', None)
+import cutlist_cmd
 
 app = adsk.core.Application.get()
 ui = app.userInterface
@@ -1181,9 +1185,14 @@ def cleanup_ui():
         placeholder_cmds.unregister()
     except Exception:
         pass
+    try:
+        cutlist_cmd.unregister()
+    except Exception:
+        pass
 
     cmd_ids = (CMD_ID, TEST_CMD_ID, TEMPLATE_CMD_ID,
-               placeholder_cmds.PREPARE_CMD_ID, placeholder_cmds.FILL_CMD_ID)
+               placeholder_cmds.PREPARE_CMD_ID, placeholder_cmds.FILL_CMD_ID,
+               cutlist_cmd.CUTLIST_CMD_ID)
     panel_ids = (PANEL_ID,) + OBSOLETE_PANEL_IDS
 
     try:
@@ -1255,6 +1264,7 @@ def run(context):
                     control.isPromoted = True
                     control.isPromotedByDefault = True
             placeholder_cmds.register(panel)
+            cutlist_cmd.register(panel)
     except Exception:
         if ui:
             ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))

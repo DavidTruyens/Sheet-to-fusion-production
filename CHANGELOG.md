@@ -27,7 +27,42 @@ Notable changes and planned work for the **Sheet to Fusion** add-in.
 - **Sheet metal flat patterns** — build or export the flat pattern of sheet-metal
   components (e.g. as a dedicated output set) alongside the solid variants.
 - **Filter by thickness** — filter which variants or components are built/exported
-  by their material thickness.
+  by their material thickness. The cut list's `Z` column is the measurement this
+  would filter on; the filtering itself is still to do.
+
+## 1.19.0 — Cut list CSV
+
+- **Create Cut List CSV** — a fourth command on the Sheet Variants panel. It
+  measures the smallest rectangular blank each part can be cut from and writes
+  `Name,X,Y,Z,Qty`, so a built assembly can be pre-cut on a beam saw before it
+  is machined.
+- Pick the parts to measure (components or bodies), or select nothing and get
+  every top-level component.
+- **X and Y are the part's two larger sides, Z the smallest**, and each row is
+  sorted that way rather than reported along the design's axes. Z is the stock
+  thickness, which makes it the column to filter or sort a cut list by.
+- **Offset per side** grows X and Y only — spare material to machine away —
+  while Z is left raw, because thickness is what you buy, not what you cut. An
+  offset of 0 gives exact part sizes, which is what a cabinet cut list wants.
+- **Identical blanks are grouped** into one row with a quantity, and the parts
+  sharing that blank are listed by name, so four identical legs read as one
+  line. Rows come out longest first.
+- Blanks are measured along the design's own axes, with
+  `measureManager.getOrientedBoundingBox` rather than `BRepBody.boundingBox`,
+  because it is measured rather than approximated around curved surfaces.
+- A part resting on a **slope** therefore gets a blank bigger than itself and a
+  Z that is not its thickness. Such a part is named in the report instead of
+  passing silently, with its blank still listed.
+- Built and then cut back: an earlier version searched for the smallest
+  *rotated* blank. Spike 15 measured what that bought on a real assembly —
+  0.03% to 0.67% on seven parts whose ends are slanted, each trading more
+  length for less width, and a *larger* blank on the one genuinely tilted part
+  (the search minimised the footprint in its frame, while the reported sides
+  were the two largest of three, which are not the same thing once a part is
+  tilted far enough). Parts are modelled and laid out square, so the search was
+  paying for a case that does not arise.
+- Parts at different heights are unaffected — each part is measured on its own,
+  so a layout stacked in Z reads the same as one laid out flat.
 
 ## 1.18.0 — Component on/off columns
 
