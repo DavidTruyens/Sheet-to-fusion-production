@@ -22,6 +22,7 @@ ends with its own PASS/FAIL verdict.
 | `SVSpike2BodyAttrs` | Do `BRepBody` attributes survive recompute, rollback and save/reopen? (run twice) |
 | `SVSpike3UpdateBody` | Does `BaseFeature.updateBody()` preserve downstream features? |
 | `SVSpike4JointOrigins` | Is the joint-origin collection `jointOrgins` or `jointOrigins`, and is an anchor readable after a recompute? |
+| `SVSpike15CutListBox` | Does `getOrientedBoundingBox` honour the axes it is given and agree with `boundingBox`, is a proxy body measured in assembly space, and are the cut list's blanks the ones you would measure by hand? |
 
 Why each one matters, what counts as a pass, and what to do when one fails:
 [`docs/superpowers/plans/2026-08-08-placeholder-spike.md`](../docs/superpowers/plans/2026-08-08-placeholder-spike.md).

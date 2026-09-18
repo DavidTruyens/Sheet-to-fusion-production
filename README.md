@@ -27,6 +27,10 @@ parameters, so the column names always match.
 - **Component on/off columns** — a sheet column named after a top-level
   component switches it off for individual variants, so one sheet can describe
   a 500 mm unit with no drawer and a 900 mm unit with one.
+- **Create Cut List CSV** — measures the smallest rectangular blank each part
+  can be cut from and writes `Name,X,Y,Z,Qty`, with an offset for the material
+  you machine away and identical blanks grouped. See
+  [Cut list](#cut-list) below.
 - **Tab picker for multi-tab sheets** — if the linked sheet has more than one
   tab, **Load tabs** lists them so you can pick the one with your variants. The
   choice is pinned per sheet and remembered next time you open that link.
@@ -343,6 +347,43 @@ If a run can't restore every parameter it drove on a mother you already had open
 warns you, names them, and tells you to close that mother **without saving** — it is
 left modified with a driven value still applied. Cancelling keeps whatever children
 were already rebuilt and reports the rest as cancelled.
+
+## Cut list
+
+**Create Cut List CSV** answers a different question from the rest of the add-in:
+not "what shall I build?" but "what do I have to cut before I can build it?" It
+measures every part and writes the blanks to a CSV.
+
+Pick the parts in the dialog — components or bodies, in any mix — or select
+nothing and it measures every top-level component in the open design. That means
+you can run it straight on a design Build Variants just produced.
+
+| Name                   | X       | Y      | Z     | Qty |
+|------------------------|---------|--------|-------|-----|
+| klas 1-1:1; klas 1-2:1 | 1240.00 | 320.00 | 18.00 | 2   |
+| zorglokaal-1:1         | 980.00  | 320.00 | 18.00 | 1   |
+
+- **X and Y are the part's two larger sides, Z the smallest**, sorted that way
+  rather than reported as X, Y and Z of the design. A standing panel comes out
+  720 × 600 × 18, not 600 × 18 × 720.
+- **Z is the thickness**, which is the column to sort or filter by when you are
+  drawing parts from boards of a few fixed thicknesses.
+- **Offset per side** is spare material to machine away, added to both sides of
+  X and of Y. Z never grows: thickness is what you buy, not what you cut. Set the
+  offset to 0 and you get exact part sizes, which is what a cabinet cut list wants.
+- **Identical blanks are grouped** into one row with a quantity, and the parts
+  sharing it are named, so four identical legs read as one line. Longest blank
+  first.
+
+Blanks are measured along the design's own axes, which assumes parts are
+modelled and laid out square — as they are coming out of Build Variants. A part
+resting on a **slope** therefore gets a blank bigger than itself and a Z that is
+not its thickness. The report names any such part rather than letting it pass:
+lay it flat and run again.
+
+Parts sitting at different **heights** are fine, which is the case that prompted
+this: each part is measured on its own, so a layout stacked in Z reads exactly
+like one laid out flat.
 
 ## How the Google connection works
 

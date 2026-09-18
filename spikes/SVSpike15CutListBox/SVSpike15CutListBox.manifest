@@ -1,0 +1,10 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "script",
+    "author": "David Truyens",
+    "description": {
+        "": "Check every Fusion API assumption the cut list command makes: that getOrientedBoundingBox honours the axes it is given and agrees with the plain boundingBox, that a proxy body is measured in assembly space, that the blanks match what you would measure by hand, and that a part on a slope is detected."
+    },
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}
